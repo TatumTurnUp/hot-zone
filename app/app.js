@@ -57,25 +57,57 @@ function rankOf(c, side, key) {
 }
 const ord = (n) => n + (['th', 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || ['th', 'st', 'nd', 'rd'][n % 100] || 'th');
 
+// ---------- team mode ----------
+// The whole site is in Braves mode or Southern Miss mode. Each side remembers its last page and scroll
+// position in memory only, so a reload starts both sides fresh at their home page.
+const MODE = { cur: 'atl', pos: { atl: { hash: '', y: 0 }, usm: { hash: '', y: 0 } } };
+const teamOfHash = (h) => { const m = String(h).replace(/^#/, '').match(/^(?:team|p|lead)-(atl|usm)/); return m ? m[1] : null; };
+const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+function setMode(t) {
+  MODE.cur = t; document.documentElement.dataset.mode = t; store.set('hz-mode', t);
+  document.querySelectorAll('.teamswitch [data-mode]').forEach((b) => { const on = b.dataset.mode === t; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
+  const tt = document.getElementById('tabteam'); if (tt) tt.href = '#team-' + t;
+  const meta = document.querySelector('meta[name=theme-color]'); if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+}
+async function fadeOut() { const m = $main(); if (reduced()) return; m.classList.add('fading'); await wait(170); }
+function fadeIn() { $main().classList.remove('fading'); }
+async function switchMode(t) {
+  if (t === MODE.cur) return;
+  MODE.pos[MODE.cur] = { hash: location.hash.replace(/^#/, ''), y: scrollY };
+  await fadeOut(); setMode(t);
+  const target = MODE.pos[t]; state.restoreY = target.y;
+  if (location.hash.replace(/^#/, '') === target.hash) route(); else location.hash = target.hash;
+}
+let scrollRAF = 0;
+addEventListener('scroll', () => { if (scrollRAF) return; scrollRAF = requestAnimationFrame(() => { scrollRAF = 0; if (!state.restoring) MODE.pos[MODE.cur].y = scrollY; }); }, { passive: true });
+
 // ---------- routing ----------
-window.addEventListener('hashchange', route);
-async function route() {
+window.addEventListener('hashchange', () => route());
+async function route(opt = {}) {
   hideTip(); closeSheet(); closePalette();
   const h = location.hash.replace(/^#\/?/, '');
+  const ht = teamOfHash(h);
+  if (ht && ht !== MODE.cur) { MODE.pos[MODE.cur].y = scrollY; await fadeOut(); setMode(ht); }
   let m;
   try {
     await index();
-    document.body.className = '';
+    document.body.className = 't-' + MODE.cur;
     if ((m = h.match(/^team-(atl|usm)$/))) await teamView(m[1]);
     else if ((m = h.match(/^p-((?:atl|usm)-[0-9a-z]+)(?:-s-([hp])-(.+))?$/))) await playerView(m[1], m[2], m[3]);
-    else if ((m = h.match(/^lead(?:-(atl|usm)-([hp])-(.+))?$/))) leadersView(m[1] || 'atl', m[2] || 'h', m[3] ? decKey(m[2], m[3]) : null);
+    else if ((m = h.match(/^lead(?:-(atl|usm)-([hp])-(.+))?$/))) leadersView(m[1] || MODE.cur, m[2] || 'h', m[3] ? decKey(m[2], m[3]) : null);
     else homeView();
   } catch (e) { $main().innerHTML = `<div class="empty">This page didn't load: ${esc(e.message)}. Check your connection and reload.</div>`; console.error(e); }
+  MODE.pos[MODE.cur].hash = h;
   markNav(h);
   C.mount();
+  if (state.restoreY != null) { state.restoring = true; const y = state.restoreY; state.restoreY = null; requestAnimationFrame(() => { scrollTo(0, y); MODE.pos[MODE.cur].y = y; state.restoring = false; }); }
+  else if (!opt.keepScroll) scrollTo(0, 0);
+  fadeIn();
+  maybeTour();
 }
 function markNav(h) {
-  const tab = h.startsWith('team-atl') || h.startsWith('p-atl') ? 'atl' : h.startsWith('team-usm') || h.startsWith('p-usm') ? 'usm' : h.startsWith('lead') ? 'lead' : 'home';
+  const tab = h.startsWith('team-') ? 'team' : h.startsWith('lead') ? 'lead' : h.startsWith('p-') ? '' : 'home';
   document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === tab));
 }
 
@@ -97,32 +129,59 @@ function table(cols, rows, opt = {}) {
 }
 function section(id, title, desc, body) { return `<section class="sec" id="${id}" data-sec="${esc(title)}"><header><div><h2>${title}</h2>${desc ? `<p>${desc}</p>` : ''}</div></header>${body}</section>`; }
 
-// ---------- HOME ----------
+// ---------- HOME (one team's season highlights) ----------
+const HOME = {
+  atl: { sub: 'Every Braves hitter and pitcher from the 2026 season, down to the pitch. Search a player, a stat, or both at once.',
+    ex: [['Olson barrel rate', 'olson barrel rate'], ['Sale spin', 'sale spin'], ['Acuña sprint speed', 'acuna sprint speed'], ['ERA', 'era'], ['Riley chase rate', 'riley chase'], ['Home runs', 'home runs']],
+    leaders: [['h', 'HR'], ['h', 'AVG'], ['p', 'ERA'], ['p', 'K'], ['h', 'xwOBA'], ['p', 'Whiff%'], ['h', 'SprintSpeed'], ['p', 'Velo']], star: [['h', 'wRC+', 'wRC+'], ['p', 'WAR', 'WAR']] },
+  usm: { sub: 'Every Golden Eagle from the 2026 season, built from all 61 box scores and the play-by-play. Search a player, a stat, or both at once.',
+    ex: [['Urban OPS', 'urban ops'], ['Clark strikeout rate', 'clark strikeout rate'], ['Morrison home runs', 'morrison home runs'], ['First-pitch strike', 'first-pitch strike'], ['Walk rate', 'walk rate'], ['Harris ERA', 'harris era']],
+    leaders: [['h', 'AVG'], ['h', 'HR'], ['p', 'ERA'], ['p', 'K'], ['h', 'OPS'], ['p', 'WHIP'], ['h', 'SB'], ['p', 'Strike%']], star: [['h', 'OPS+', 'OPS+'], ['p', 'FIP', 'FIP']] },
+};
+function teamHighlights(T) {
+  const g = T.games.filter((x) => !x.gt || x.gt === 'R');
+  let best = 0, run = 0, bestEnd = null;
+  g.forEach((x, i) => { if (x.result === 'W') { run++; if (run > best) { best = run; bestEnd = i; } } else run = 0; });
+  const big = g.reduce((a, x) => ((x.us - x.them) > (a ? a.us - a.them : -99) ? x : a), null);
+  const rec = (xs) => `${xs.filter((x) => x.result === 'W').length}-${xs.filter((x) => x.result === 'L').length}`;
+  const home = g.filter((x) => x.home && !x.neutral), away = g.filter((x) => !x.home && !x.neutral);
+  const months = {}; g.forEach((x) => { const m = x.date.slice(0, 7); (months[m] = months[m] || []).push(x); });
+  const runsFor = g.reduce((a, x) => a + (x.us || 0), 0), runsAg = g.reduce((a, x) => a + (x.them || 0), 0);
+  const streakStart = bestEnd != null ? g[bestEnd - best + 1] : null;
+  return { best, streakStart, streakEnd: bestEnd != null ? g[bestEnd] : null, big, home: rec(home), away: rec(away), months, runsFor, runsAg, games: g };
+}
 function homeView() {
-  const I = state.index, T = I.teams;
-  const recent = store.get('hz-recent', []).map(byId).filter(Boolean).slice(0, 4);
-  const sugg = [...recent.map((c) => [c.name, `#p-${c.id}`]), ['Olson barrel rate', 'q:olson barrel'], ['ERA leaders', '#lead-atl-p-ERA'], ['Joey Urban', 'q:urban'], ['Fastball velocity', '#lead-atl-p-Velo'], ['Strikeout rate', 'q:strikeout rate']].slice(0, 6);
-  const lastN = (g) => g.filter((x) => !x.gt || x.gt === 'R').slice(-10);
-  const board = (t) => {
-    const games = T[t].games.filter((g) => !g.gt || g.gt === 'R'); let rd = 0; const rdv = games.map((g) => (rd += (g.us ?? 0) - (g.them ?? 0)));
-    return `<a class="board t-${t}" href="#team-${t}" aria-label="${esc(T[t].name)} team page">
-      <div style="display:flex;gap:14px;align-items:center">${badge(t)}<div><div class="bname">${esc(T[t].name)}</div><div class="bsub">${esc(T[t].level)}, ${I.season}${t === 'atl' ? `; ${esc(T.atl.postseason)} in the postseason` : `; ${esc(T.usm.conf_record)} in conference`}</div></div></div>
-      <div class="brec">${esc(T[t].record)}</div>
-      <div class="bspark">${spark(rdv, 'rgba(255,255,255,.85)', { h: 46 })}</div>
-      <div class="last10">Last 10&nbsp; ${lastN(T[t].games).map((g) => `<i style="background:${g.result === 'W' ? '#3ccf6a' : '#ff7a6b'}" title="${g.result} ${g.us}-${g.them}"></i>`).join('')}&nbsp; Run differential ${rd > 0 ? '+' : ''}${rd}</div></a>`;
-  };
-  const leadSet = [['atl', 'h', 'HR'], ['atl', 'p', 'ERA'], ['usm', 'h', 'AVG'], ['atl', 'h', 'xwOBA'], ['usm', 'p', 'K'], ['atl', 'p', 'Whiff%'], ['usm', 'h', 'HR'], ['atl', 'h', 'SprintSpeed']];
+  const t = MODE.cur, I = state.index, T = I.teams[t], H = HOME[t], hl = teamHighlights(T);
+  let rd = 0; const rdv = hl.games.map((x) => (rd += (x.us ?? 0) - (x.them ?? 0)));
+  const md = (d) => new Date(d + 'T12:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const mx = Math.max(...Object.values(hl.months).map((xs) => xs.length));
+  const star = (side, key) => ranking(t, side, key)[0];
+  const stars = [...H.star.map(([s, k]) => [s, k]), ['h', 'HR'], ['p', 'K']].map(([s, k]) => { const c = star(s, k); return c && { c, s, k }; }).filter(Boolean);
   $main().innerHTML = `
     <div class="homehero">
-      <h1>Find any stat.</h1>
-      <p>Braves and Southern Miss baseball, 2026 season. Search a player, a stat, or both at once, like “Olson barrel rate.”</p>
+      <div class="homehead"><h1>Find any stat.</h1><a class="fullstats" href="#team-${t}">Full ${TEAM[t].short} stats <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></div>
+      <p>${esc(H.sub)}</p>
       <button class="bigfind" data-open-find>${ICON.search}<span>Search players and stats</span></button>
-      <div class="suggest">${sugg.map(([l, go]) => `<a class="pill" href="${go.startsWith('#') ? go : '#'}" ${go.startsWith('q:') ? `data-q="${esc(go.slice(2))}"` : ''}>${esc(l)}</a>`).join('')}</div>
+      <div class="suggest">${H.ex.map(([l, q]) => `<a class="pill" href="#" data-q="${esc(q)}">${esc(l)}</a>`).join('')}</div>
     </div>
-    <div class="boards">${board('atl')}${board('usm')}</div>
-    <h2 class="h2">Season leaders</h2><p class="lede">Swipe for more. Tap a name to open the player, or a card to see the full list.</p>
-    <div class="rail">${leadSet.map(([t, s, k]) => leadCard(t, s, k)).join('')}</div>
-    <div class="footer">Data from the MLB Stats API and Baseball Savant (Braves) and southernmiss.com box scores (Southern Miss).<br>Updated ${esc(I.built.replace('T', ' ').replace('Z', ' UTC'))}</div>`;
+    <a class="board t-${t}" href="#team-${t}" aria-label="${esc(T.name)} full stats">
+      <div style="display:flex;gap:14px;align-items:center">${badge(t)}<div><div class="bname">${esc(T.name)}</div><div class="bsub">${esc(T.level)}, ${I.season} season${t === 'atl' ? `; ${esc(T.postseason)} in the postseason` : `; ${esc(T.conf_record)} in conference`}</div></div></div>
+      <div class="brec">${esc(T.record)}</div>
+      <div class="bspark">${spark(rdv, 'rgba(255,255,255,.85)', { h: 54 })}</div>
+      <div class="last10">Last 10&nbsp; ${hl.games.slice(-10).map((x) => `<i style="background:${x.result === 'W' ? '#3ccf6a' : '#ff7a6b'}" title="${x.result} ${x.us}-${x.them}"></i>`).join('')}&nbsp; Run differential ${rd > 0 ? '+' : ''}${rd}</div></a>
+    <h2 class="h2" style="margin-top:30px">Season highlights</h2><p class="lede">The 2026 season at a glance.</p>
+    <div class="hl">
+      <div class="hlcard"><div class="k">Longest win streak</div><div class="v">${hl.best} straight</div><div class="d">${hl.streakStart ? `${md(hl.streakStart.date)} to ${md(hl.streakEnd.date)}` : ''}</div></div>
+      <div class="hlcard"><div class="k">Biggest win</div><div class="v">${hl.big ? `${hl.big.us}-${hl.big.them}` : '—'}</div><div class="d">${hl.big ? `${hl.big.home ? 'vs' : 'at'} ${esc(hl.big.opp)}, ${md(hl.big.date)}` : ''}</div></div>
+      <div class="hlcard"><div class="k">Home / road</div><div class="v">${hl.home} / ${hl.away}</div><div class="d">${t === 'usm' ? 'Neutral-site games not counted' : 'Regular season'}</div></div>
+      <div class="hlcard"><div class="k">Runs scored / allowed</div><div class="v">${hl.runsFor} / ${hl.runsAg}</div><div class="d">${(hl.runsFor / hl.games.length).toFixed(1)} scored per game</div></div>
+      <div class="hlcard" style="grid-column:1 / -1;min-width:0"><div class="k">Wins by month</div><div class="months">${Object.entries(hl.months).map(([m, xs]) => { const w = xs.filter((x) => x.result === 'W').length; return `<div ${C.tipAttr(`<b>${new Date(m + '-15').toLocaleString('en-US', { month: 'long' })}</b><br>${w}-${xs.length - w}`)}><span class="num" style="font-size:15px;color:var(--ink)">${w}-${xs.length - w}</span><b style="height:${Math.max(4, (w / mx) * 80)}px"></b>${new Date(m + '-15').toLocaleString('en-US', { month: 'short' })}</div>`; }).join('')}</div></div>
+    </div>
+    <h2 class="h2">Standouts</h2><p class="lede">The team leaders in the stats that sum up a season.</p>
+    <div class="standouts">${stars.map(({ c, s, k }) => `<a class="standout" href="#p-${c.id}-s-${s}-${encKey(k)}">${av(c, true)}<span class="n">${esc(c.name)}<small>${esc(c.pos || '')}</small></span><span class="v">${fmtStat(k, s, c.s[s + '.' + k])}<small>${esc((s === 'p' ? STATS.P : STATS.H)[k].label)}</small></span></a>`).join('')}</div>
+    <h2 class="h2">Season leaders</h2><p class="lede">Swipe for more. Tap a name for the player, or a card title for the full list.</p>
+    <div class="rail">${H.leaders.map(([s, k]) => leadCard(t, s, k)).join('')}</div>
+    <div class="footer">${t === 'atl' ? 'Data from the MLB Stats API and Baseball Savant.' : 'Data from southernmiss.com box scores and play-by-play.'}<br>Updated ${esc(I.built.replace('T', ' ').replace('Z', ' UTC'))}</div>`;
 }
 function leadCard(t, s, k, n = 5) {
   const meta = (s === 'p' ? STATS.P : STATS.H)[k]; const list = ranking(t, s, k).slice(0, n);
@@ -176,16 +235,17 @@ async function teamView(t) {
 function leadersView(t, side, key) {
   const reg = side === 'p' ? STATS.P : STATS.H;
   key = key || (side === 'p' ? 'ERA' : 'HR');
+  if (!reg[key]) key = side === 'p' ? 'ERA' : 'HR';
   const meta = reg[key];
   const qual = ui('lead-q', true);
   const list = ranking(t, side, key, qual);
   const max = Math.max(...list.map((c) => Math.abs(c.s[side + '.' + key] || 0)), 1e-9);
   const avail = Object.keys(reg).filter((k) => state.index.players.some((c) => c.team === t && c.s[side + '.' + k] != null));
+  if (!avail.includes(key)) avail.unshift(key);
   const g = window.gloss(meta.g || key);
   $main().innerHTML = `
-    <div class="homehero" style="padding-bottom:12px"><h1 style="font-size:clamp(34px,6vw,56px)">${esc(meta.label)} leaders</h1><p>${esc(g ? g[1] : '')}</p></div>
+    <div class="homehero" style="padding-bottom:12px"><h1 style="font-size:clamp(34px,6vw,56px)">${esc(meta.label)} leaders</h1><p style="margin:-4px 0 8px;color:var(--ink-3)">${esc(TEAM[t].name)}</p><p>${esc(g ? g[1] : '')}</p></div>
     <div class="toolbar">
-      <div class="seg">${['atl', 'usm'].map((x) => `<button class="${x === t ? 'on' : ''}" data-lt="${x}">${TEAM[x].short}</button>`).join('')}</div>
       <div class="seg">${[['h', 'Hitting'], ['p', 'Pitching']].map(([v, l]) => `<button class="${v === side ? 'on' : ''}" data-ls="${v}">${l}</button>`).join('')}</div>
       <select id="lstat" aria-label="Choose a stat" style="height:42px;border-radius:12px;background:var(--panel);color:var(--ink);border:1px solid var(--rule);padding:0 12px;font:inherit">${avail.map((k) => `<option value="${esc(k)}" ${k === key ? 'selected' : ''}>${esc(reg[k].label)}</option>`).join('')}</select>
       ${meta.q ? `<button class="chip ${qual ? 'on' : ''}" data-lq>${qual ? `Qualified only (${STATS.MIN[t][side]}+ ${side === 'h' ? 'PA' : 'IP'})` : 'Showing everyone'}</button>` : ''}
@@ -193,9 +253,8 @@ function leadersView(t, side, key) {
     <div style="display:grid;gap:2px;margin-top:8px">${list.map((c, i) => { const v = c.s[side + '.' + key]; return `<a class="leadrow" href="#p-${c.id}-s-${side}-${encKey(key)}" style="grid-template-columns:34px 34px minmax(0,1fr) minmax(70px,30%) 70px;padding:8px 4px">
       <span class="num" style="color:var(--ink-3);font-size:18px">${i + 1}</span>${av(c)}<span class="n">${esc(c.name)}<small>${esc(c.pos || '')}</small></span>
       <span style="height:10px;background:var(--panel);border-radius:5px;overflow:hidden"><span style="display:block;height:100%;width:${(Math.abs(v) / max) * 100}%;background:${i === 0 ? 'var(--amber)' : 'var(--s1)'};border-radius:5px"></span></span>
-      <span class="v" style="text-align:right">${fmtStat(key, side, v)}</span></a>`; }).join('') || '<div class="empty">Nobody qualifies yet. Turn off "Qualified only" to see everyone.</div>'}</div>`;
+      <span class="v" style="text-align:right">${fmtStat(key, side, v)}</span></a>`; }).join('') || `<div class="empty">${state.index.players.some((c) => c.team === t && c.s[side + '.' + key] != null) ? 'Nobody qualifies yet. Turn off "Qualified only" to see everyone.' : esc(TEAM[t].name) + ' doesn\u2019t track this stat. Switch teams at the top to see it for the other side.'}</div>`}</div>`;
   const go = (tt, ss, kk) => (location.hash = `lead-${tt}-${ss}-${encKey(kk)}`);
-  $main().querySelectorAll('[data-lt]').forEach((b) => (b.onclick = () => { const r2 = side === 'p' ? STATS.P : STATS.H; const k2 = state.index.players.some((c) => c.team === b.dataset.lt && c.s[side + '.' + key] != null) ? key : (side === 'p' ? 'ERA' : 'HR'); go(b.dataset.lt, side, k2); }));
   $main().querySelectorAll('[data-ls]').forEach((b) => (b.onclick = () => { const r2 = b.dataset.ls === 'p' ? STATS.P : STATS.H; go(t, b.dataset.ls, r2[key] && state.index.players.some((c) => c.team === t && c.s[b.dataset.ls + '.' + key] != null) ? key : (b.dataset.ls === 'p' ? 'ERA' : 'HR')); }));
   document.getElementById('lstat').onchange = (e) => go(t, side, e.target.value);
   const lq = $main().querySelector('[data-lq]'); if (lq) lq.onclick = () => { state.ui['lead-q'] = !qual; leadersView(t, side, key); };
@@ -237,7 +296,7 @@ async function playerView(id, openSide, openKey) {
     <div class="keys">${keyHTML}</div>
     <nav class="index" aria-label="Sections">${secs.map((s) => `<a href="#${s.id}" data-jump="${s.id}">${esc(s.nav)}</a>`).join('')}</nav>
     <div id="secs">${secs.map((s) => s.html).join('')}</div>`;
-  $main().querySelectorAll('[data-pside]').forEach((b) => (b.onclick = () => { state.ui['side-' + id] = b.dataset.pside; location.hash = `p-${id}`; route(); }));
+  $main().querySelectorAll('[data-pside]').forEach((b) => (b.onclick = () => { state.ui['side-' + id] = b.dataset.pside; if (location.hash === `#p-${id}`) route({ keepScroll: true }); else location.hash = `p-${id}`; }));
   bindPlayer(p, side);
   if (openKey) { const k = decKey(openSide, openKey); if (k) setTimeout(() => openStat(id, openSide, k), 60); }
 }
@@ -523,11 +582,13 @@ function renderResults(q) {
   if (!qn) {
     const rec = store.get('hz-recent', []).map(byId).filter(Boolean).slice(0, 5);
     if (rec.length) items.push(['Recently viewed', rec.map((c) => ({ go: `#p-${c.id}`, html: `${av(c)}<span class="main"><b>${esc(c.name)}</b><small>${esc(c.pos || '')}, ${TEAM[c.team].short}</small></span>` }))]);
-    items.push(['Try', [['Olson barrel', 'Braves stat for one player'], ['ERA', 'Team leaders'], ['Urban', 'Southern Miss player'], ['spin', 'Find a stat by name']].map(([t, d]) => ({ q: t, html: `<span class="ico">${ICON.search}</span><span class="main"><b>${esc(t)}</b><small>${esc(d)}</small></span>` }))]);
+    const tryEx = MODE.cur === 'atl' ? [['olson barrel', 'One player\u2019s stat'], ['spin', 'Leaders for a stat'], ['urban', 'A Southern Miss player'], ['28', 'Search by jersey number']] : [['urban ops', 'One player\u2019s stat'], ['walk rate', 'Leaders for a stat'], ['olson', 'A Braves player'], ['1', 'Search by jersey number']];
+    items.push(['Try typing', tryEx.map(([t, d]) => ({ q: t, html: `<span class="ico">${ICON.search}</span><span class="main"><b>${esc(t)}</b><small>${esc(d)}</small></span>` }))]);
   } else {
     const words = qn.split(/\s+/);
     // split query into player part + stat part
-    const players = I.players.map((c) => { const n = norm(c.name); const hits = words.filter((w) => w.length > 1 && n.split(/\s+/).some((part) => part.startsWith(w))); return { c, hits }; }).filter((x) => x.hits.length).sort((a, b) => b.hits.length - a.hits.length || (b.c.sort || 0) - (a.c.sort || 0));
+    const players = I.players.map((c) => { const n = norm(c.name); const hits = words.filter((w) => (w.length > 1 && n.split(/\s+/).some((part) => part.startsWith(w))) || (/^\d+$/.test(w) && String(c.number) === w)); return { c, hits }; }).filter((x) => x.hits.length)
+      .sort((a, b) => b.hits.length - a.hits.length || (b.c.team === MODE.cur) - (a.c.team === MODE.cur) || (b.c.sort || 0) - (a.c.sort || 0));
     const usedWords = players.length ? players[0].hits : [];
     const statQ = words.filter((w) => !usedWords.includes(w)).join(' ');
     const stats = statMatches(statQ || (players.length ? '' : qn));
@@ -539,29 +600,58 @@ function renderResults(q) {
     if (players.length) items.push(['Players', players.slice(0, 8).map(({ c }) => ({ go: `#p-${c.id}`, html: `${av(c)}<span class="main"><b>${esc(c.name)}</b><small>${esc(c.pos || '')}, ${TEAM[c.team].short}</small></span><span class="rv">${c.role === 'pitcher' ? fmtStat('ERA', 'p', c.s['p.ERA']) : fmtStat('AVG', 'h', c.s['h.AVG'])}</span>` }))]);
     if (stats.length && !players.length) {
       const rows = [];
-      for (const st of stats.slice(0, 4)) for (const t of ['atl', 'usm']) { const top = ranking(t, st.side, st.k)[0]; if (top) rows.push({ go: `#lead-${t}-${st.side}-${encKey(st.k)}`, html: `<span class="ico">${TEAM[t].abbr}</span><span class="main"><b>${esc(st.m.label)} leaders</b><small>${TEAM[t].short} ${st.side === 'p' ? 'pitching' : 'hitting'}; leader: ${esc(top.name)}</small></span><span class="rv">${fmtStat(st.k, st.side, top.s[st.side + '.' + st.k])}</span>` }); }
+      for (const st of stats.slice(0, 4)) for (const t of [MODE.cur, MODE.cur === 'atl' ? 'usm' : 'atl']) { const top = ranking(t, st.side, st.k)[0]; if (top) rows.push({ go: `#lead-${t}-${st.side}-${encKey(st.k)}`, html: `<span class="ico t-${t}">${TEAM[t].abbr}</span><span class="main"><b>${esc(st.m.label)} leaders</b><small>${TEAM[t].short} ${st.side === 'p' ? 'pitching' : 'hitting'}; leader: ${esc(top.name)}</small></span><span class="rv">${fmtStat(st.k, st.side, top.s[st.side + '.' + st.k])}</span>` }); }
       items.push(['Stats', rows]);
     }
   }
+  if (qn && !items.length) {
+    const G = window.GLOSSARY; const hits = Object.entries(G).filter(([k, v]) => norm(k).includes(qn) || norm(v[0]).includes(qn)).slice(0, 5);
+    if (hits.length) items.push(['What that means', hits.map(([k, v]) => ({ gl: k, html: `<span class="ico">?</span><span class="main"><b>${esc(v[0])}</b><small>${esc(v[1].slice(0, 90))}${v[1].length > 90 ? '…' : ''}</small></span>` }))]);
+  }
   const flatItems = items.flatMap(([, xs]) => xs);
-  box.innerHTML = flatItems.length ? items.map(([g, xs]) => `<div class="grp">${esc(g)}</div>${xs.map((x) => `<button class="item" data-pgo="${esc(x.go || '')}" data-pq="${esc(x.q || '')}">${x.html}</button>`).join('')}`).join('')
-    : `<div class="empty">Nothing matches “${esc(q)}”. Try a last name, a jersey number, or a stat like “walk rate”.</div>`;
+  box.innerHTML = flatItems.length ? items.map(([g, xs]) => `<div class="grp">${esc(g)}</div>${xs.map((x) => `<button class="item" data-pgo="${esc(x.go || '')}" data-pq="${esc(x.q || '')}" data-pgl="${esc(x.gl || '')}">${x.html}</button>`).join('')}`).join('')
+    : `<div class="empty">Nothing matches “${esc(q)}”. Try a last name, a jersey number, or a stat like “walk rate” or “spin”.</div>`;
   state.sel = 0; markSel();
   box.querySelectorAll('.item').forEach((b) => (b.onclick = () => pick(b)));
 }
 function markSel() { const its = [...document.querySelectorAll('#pres .item')]; its.forEach((x, i) => x.classList.toggle('sel', i === state.sel)); if (its[state.sel]) its[state.sel].scrollIntoView({ block: 'nearest' }); }
-function pick(b) { if (b.dataset.pq) { document.getElementById('pq').value = b.dataset.pq; renderResults(b.dataset.pq); return; } closePalette(); if (location.hash === b.dataset.pgo) route(); else location.hash = b.dataset.pgo; }
+function pick(b) { if (b.dataset.pgl) { closePalette(); const d = window.gloss(b.dataset.pgl); openSheetHTML(`<div class="grab"></div><button class="sx" data-close aria-label="Close">×</button><h2>${esc(d[0])}</h2><p class="def">${esc(d[1])}</p><p class="note">Find it in “Every stat” at the bottom of a player page.</p>`); return; } if (b.dataset.pq) { document.getElementById('pq').value = b.dataset.pq; renderResults(b.dataset.pq); return; } closePalette(); if (location.hash === b.dataset.pgo) route(); else location.hash = b.dataset.pgo; }
+
+// ---------- tutorial ----------
+const TOUR = () => {
+  const atl = MODE.cur === 'atl';
+  const ex = atl ? [['Olson barrel rate', 'one player\u2019s stat'], ['Sale spin', 'one player\u2019s stat'], ['ERA', 'team leaders'], ['Joey Urban', 'works for both teams']]
+    : [['Urban OPS', 'one player\u2019s stat'], ['Clark strikeout rate', 'one player\u2019s stat'], ['walk rate', 'team leaders'], ['Matt Olson', 'works for both teams']];
+  return [
+    { h: 'Search anything', p: 'Type a player, a stat, or both together. Results come from both teams. Tap an example to try it:', demo: ex.map(([q, d]) => `<button class="ex" data-tq="${esc(q)}">${ICON.search}<code>${esc(q)}</code><span>${esc(d)}</span></button>`).join('') },
+    { h: 'Tap any number', p: 'Every stat on a player page opens a card that explains what it means, where he ranks on his team, and how it changed over the season.', demo: `<div class="key" style="pointer-events:none;max-width:220px"><span class="kl">${atl ? 'Batting average' : 'Batting average'}</span><span class="kv">${atl ? '.251' : '.320'}</span><span class="kr"><b>${atl ? '6th' : '2nd'}</b> of ${atl ? 9 : 7} on the team</span></div>` },
+    { h: 'Braves or Southern Miss', p: 'The switch at the top right flips the whole site between the two teams. Each side remembers the page you were on until you reload.', demo: `<div class="teamswitch" style="pointer-events:none;justify-self:start"><button class="t-atl ${atl ? 'on' : ''}"><i></i>Braves</button><button class="t-usm ${atl ? '' : 'on'}"><i></i>Southern Miss</button></div>` },
+    { h: 'Inside a player page', p: 'Use the bar under the key stats to jump to the strike zone, spray chart, trends, splits or game log. On a phone, swipe charts sideways. “Every stat” at the bottom has its own search box.', demo: '' },
+  ];
+};
+function openTour(i = 0) {
+  const steps = TOUR(); const st = steps[i]; const el = document.getElementById('tour');
+  el.innerHTML = `<div class="step">${i + 1} of ${steps.length}</div><h2>${esc(st.h)}</h2><p>${esc(st.p)}</p>${st.demo ? `<div class="demo">${st.demo}</div>` : ''}
+    <div class="nav"><div class="dots">${steps.map((_, k) => `<i class="${k === i ? 'on' : ''}"></i>`).join('')}</div><div>${i > 0 ? '<button class="prev">Back</button>' : '<button class="prev skip">Skip</button>'}<button class="next">${i === steps.length - 1 ? 'Start exploring' : 'Next'}</button></div></div>`;
+  el.classList.add('on'); document.getElementById('scrim').classList.add('on'); store.set('hz-toured', true);
+  el.querySelector('.next').onclick = () => (i === steps.length - 1 ? closeTour() : openTour(i + 1));
+  el.querySelector('.prev').onclick = () => (i > 0 ? openTour(i - 1) : closeTour());
+  el.querySelectorAll('[data-tq]').forEach((b) => (b.onclick = () => { closeTour(); openPalette(b.dataset.tq); }));
+  setTimeout(() => el.querySelector('.next').focus(), 30);
+}
+function closeTour() { const el = document.getElementById('tour'); if (!el || !el.classList.contains('on')) return; el.classList.remove('on'); if (!document.getElementById('palette').classList.contains('on') && !document.getElementById('sheet').classList.contains('on')) document.getElementById('scrim').classList.remove('on'); }
+function maybeTour() { if (!state.tourChecked) { state.tourChecked = true; if (!store.get('hz-toured', false)) setTimeout(() => openTour(0), 500); } }
 
 // ---------- boot ----------
 document.addEventListener('click', (e) => {
   if (e.target.closest('[data-open-find]')) { e.preventDefault(); openPalette(); }
   const q = e.target.closest('[data-q]'); if (q) { e.preventDefault(); openPalette(q.dataset.q); }
-  if (e.target.id === 'scrim') { closePalette(); closeSheet(); }
+  if (e.target.id === 'scrim') { closePalette(); closeSheet(); closeTour(); }
 });
 document.addEventListener('keydown', (e) => {
   const open = document.getElementById('palette').classList.contains('on');
   if ((e.key === 'k' && (e.metaKey || e.ctrlKey)) || (e.key === '/' && !open && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName))) { e.preventDefault(); openPalette(); return; }
-  if (e.key === 'Escape') { closePalette(); closeSheet(); return; }
+  if (e.key === 'Escape') { closePalette(); closeSheet(); closeTour(); return; }
   if (open) {
     const n = document.querySelectorAll('#pres .item').length;
     if (e.key === 'ArrowDown') { e.preventDefault(); state.sel = Math.min(n - 1, state.sel + 1); markSel(); }
@@ -572,8 +662,11 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('pq').addEventListener('input', (e) => renderResults(e.target.value));
 document.getElementById('theme').addEventListener('click', () => {
   const cur = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-  document.documentElement.dataset.theme = cur; store.set('hz-theme', cur); route();
+  document.documentElement.dataset.theme = cur; store.set('hz-theme', cur); setMode(MODE.cur); route({ keepScroll: true });
 });
 (() => { const t = store.get('hz-theme', null); if (t) document.documentElement.dataset.theme = t; })();
+setMode(teamOfHash(location.hash) || store.get('hz-mode', 'atl'));
+document.querySelectorAll('.teamswitch [data-mode]').forEach((b) => (b.onclick = () => switchMode(b.dataset.mode)));
+document.getElementById('help').onclick = () => openTour(0);
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 route();

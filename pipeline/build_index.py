@@ -46,7 +46,7 @@ def flat(pid):
                         ('ERA',s.get('era')),('FIP',sb.get('fip')),('xFIP',sb.get('xfip')),('WHIP',s.get('whip')),('K',s.get('strikeOuts')),('BB',s.get('baseOnBalls')),('HR',s.get('homeRuns')),
                         ('K/9',s.get('strikeoutsPer9Inn')),('BB/9',s.get('walksPer9Inn')),('K%',sc.get('k_pct')),('BB%',sc.get('bb_pct')),('K-BB%',adv.get('strikeoutsMinusWalksPercentage')),
                         ('Whiff%',sc.get('whiff_pct')),('CSW%',sc.get('csw_pct')),('Chase%',sc.get('chase_pct')),('xwOBA',sc.get('xwoba')),('xBA',sc.get('xba')),('EV',sc.get('avg_ev')),
-                        ('Barrel%',sc.get('barrel_pct')),('HardHit%',sc.get('hard_hit_pct')),('GB%',sc.get('gb_pct')),('Velo',fb['velo'] if fb else None),('WAR',sb.get('war')),('OPP AVG',s.get('avg'))]: put('p.'+k,v)
+                        ('Barrel%',sc.get('barrel_pct')),('HardHit%',sc.get('hard_hit_pct')),('GB%',sc.get('gb_pct')),('Velo',fb['velo'] if fb else None),('Spin',fb['spin'] if fb else None),('Ext',fb['extension'] if fb else None),('IVB',fb['ivb'] if fb else None),('WAR',sb.get('war')),('OPP AVG',s.get('avg'))]: put('p.'+k,v)
     else:
         h=p.get('hitting')
         if h:

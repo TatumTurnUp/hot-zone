@@ -11,7 +11,7 @@ window.STATS = (function () {
     '2B': S('Doubles', 'int', 'high', { g: '2B' }), '3B': S('Triples', 'int', 'high', { g: '3B' }),
     ISO: S('Isolated power', 'avg', 'high', { q: 1, g: 'ISO' }), BABIP: S('BABIP', 'avg', null, { q: 1, g: 'BABIP' }),
     wOBA: S('wOBA', 'avg', 'high', { q: 1, trend: 'woba', g: 'wOBA' }), 'wRC+': S('wRC+', 'int', 'high', { q: 1, g: 'wRC+' }),
-    'OPS+': S('OPS+ (team-relative)', 'int', 'high', { q: 1, g: 'OPS+' }), WAR: S('WAR', 'n1', 'high', { g: 'WAR' }),
+    'OPS+': S('OPS+', 'int', 'high', { q: 1, g: 'OPS+' }), WAR: S('WAR', 'n1', 'high', { g: 'WAR' }),
     xBA: S('Expected AVG', 'avg', 'high', { q: 1, g: 'xBA' }), xSLG: S('Expected SLG', 'avg', 'high', { q: 1, g: 'xSLG' }),
     xwOBA: S('Expected wOBA', 'avg', 'high', { q: 1, trend: 'xwoba', g: 'xwOBA' }),
     EV: S('Avg exit velocity', 'n1', 'high', { q: 1, trend: 'avg_ev', unit: 'mph', g: 'avg EV' }), maxEV: S('Max exit velocity', 'n1', 'high', { unit: 'mph', g: 'max EV' }),
@@ -37,13 +37,14 @@ window.STATS = (function () {
     xwOBA: S('Expected wOBA allowed', 'avg', 'low', { q: 1, trend: 'xwoba', g: 'xwOBA' }), xBA: S('Expected AVG allowed', 'avg', 'low', { q: 1, g: 'xBA' }),
     EV: S('Avg exit velo allowed', 'n1', 'low', { q: 1, unit: 'mph', g: 'avg EV' }), 'Barrel%': S('Barrel rate allowed', 'pct', 'low', { q: 1, g: 'Barrel%' }),
     'HardHit%': S('Hard-hit rate allowed', 'pct', 'low', { q: 1, g: 'Hard Hit%' }), 'GB%': S('Ground-ball rate', 'pct', 'high', { q: 1, g: 'GB%' }),
-    Velo: S('Fastball velocity', 'n1', 'high', { unit: 'mph', g: 'Velo' }), WAR: S('WAR', 'n1', 'high', { g: 'WAR' }), 'OPP AVG': S('Opponent AVG', 'avg', 'low', { q: 1, g: 'OPP AVG' }),
+    Velo: S('Fastball velocity', 'n1', 'high', { q: 1, unit: 'mph', g: 'Velo' }), Spin: S('Fastball spin rate', 'int', 'high', { q: 1, unit: 'rpm', g: 'Spin' }),
+    Ext: S('Extension', 'n1', 'high', { q: 1, unit: 'ft', g: 'Ext' }), IVB: S('Fastball rise (IVB)', 'n1', 'high', { q: 1, unit: 'in', g: 'IVB' }), WAR: S('WAR', 'n1', 'high', { g: 'WAR' }), 'OPP AVG': S('Opponent AVG', 'avg', 'low', { q: 1, g: 'OPP AVG' }),
     'Strike%': S('Strike rate', 'pct', 'high', { q: 1, g: 'Strike%' }), 'F-Strike%': S('First-pitch strike rate', 'pct', 'high', { q: 1, g: 'F-Strike%' }),
     'Putaway%': S('Put-away rate', 'pct', 'high', { q: 1, g: 'Putaway%' }), 'P/IP': S('Pitches per inning', 'n1', 'low', { q: 1, g: 'P/IP' }),
   };
   // search aliases -> stat key
   const ALIAS = { 'batting average': 'AVG', average: 'AVG', 'home run': 'HR', homers: 'HR', homeruns: 'HR', 'home runs': 'HR', rbis: 'RBI', steals: 'SB', 'stolen bases': 'SB',
-    walks: 'BB', strikeouts: 'K', ks: 'K', 'exit velo': 'EV', 'exit velocity': 'EV', velo: 'Velo', velocity: 'Velo', barrel: 'Barrel%', barrels: 'Barrel%', 'hard hit': 'HardHit%',
+    walks: 'BB', strikeouts: 'K', ks: 'K', 'exit velo': 'EV', 'exit velocity': 'EV', velo: 'Velo', velocity: 'Velo', spin: 'Spin', 'spin rate': 'Spin', rpm: 'Spin', extension: 'Ext', ride: 'IVB', rise: 'IVB', 'vertical break': 'IVB', 'induced vertical break': 'IVB', ivb: 'IVB', 'fastball velocity': 'Velo', 'mph': 'Velo', barrel: 'Barrel%', barrels: 'Barrel%', 'hard hit': 'HardHit%',
     whiff: 'Whiff%', whiffs: 'Whiff%', chase: 'Chase%', 'sweet spot': 'SweetSpot%', 'launch angle': 'LA', 'bat speed': 'BatSpeed', 'sprint speed': 'SprintSpeed', speed: 'SprintSpeed',
     'k rate': 'K%', 'walk rate': 'BB%', 'strikeout rate': 'K%', saves: 'SV', wins: 'W', innings: 'IP', 'on base': 'OBP', slugging: 'SLG', defense: 'OAA', 'outs above average': 'OAA',
     'first pitch strike': 'F-Strike%', 'strike rate': 'Strike%', putaway: 'Putaway%', 'put away': 'Putaway%', csw: 'CSW%', 'ground ball': 'GB%', groundball: 'GB%', 'fly ball': 'FB%', pull: 'Pull%', war: 'WAR' };
