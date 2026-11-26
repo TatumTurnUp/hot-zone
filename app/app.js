@@ -69,6 +69,10 @@ function setMode(t) {
   document.querySelectorAll('.teamswitch [data-mode]').forEach((b) => { const on = b.dataset.mode === t; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
   const tt = document.getElementById('tabteam'); if (tt) tt.href = '#team-' + t;
   const meta = document.querySelector('meta[name=theme-color]'); if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+  // favicon = the strike-zone mark in the active team's colors
+  const fg = t === 'atl' ? '#ce1141' : '#ffb81c', bg = t === 'atl' ? '#13274f' : '#0b0a08';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="${bg}"/><path d="M12.3 4v24M19.7 4v24M5 11.7h22M5 20.3h22" stroke="${fg}" stroke-width="1" opacity=".45"/><rect x="5" y="4" width="22" height="24" rx="3" fill="none" stroke="${fg}" stroke-width="2.2"/><rect x="11.5" y="11" width="9" height="10" rx="1.5" fill="${fg}"/></svg>`;
+  let fav = document.getElementById('favicon'); if (fav) fav.href = 'data:image/svg+xml,' + encodeURIComponent(svg);
 }
 async function fadeOut() { const m = $main(); if (reduced()) return; m.classList.add('fading'); await wait(170); }
 function fadeIn() { $main().classList.remove('fading'); }
