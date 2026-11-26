@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hot Zone</title>
+<meta name="description" content="Braves and Southern Miss baseball stats — every player, every pitch.">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Hot Zone">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="back" id="back" style="display:none" aria-label="Back">‹ Back</button>
+  <a class="brand" href="#"><svg class="ball" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="#f4f1ea" stroke="#ce1141" stroke-width="1.5"/><path d="M8 6c4 5 4 15 0 20M24 6c-4 5-4 15 0 20" fill="none" stroke="#ce1141" stroke-width="1.6" stroke-dasharray="2 2"/></svg>Hot Zone</a>
+  <div class="spacer"></div>
+  <button class="iconbtn" id="theme" aria-label="Toggle light/dark">◐</button>
+</header>
+<main id="main"><div class="empty">Loading…</div></main>
+<div id="tip" role="tooltip"></div>
+<div id="gloss" role="dialog" aria-live="polite"><button class="x" aria-label="Close">×</button><div class="t"></div><div class="d"></div></div>
+<script src="glossary.js"></script>
+<script src="charts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

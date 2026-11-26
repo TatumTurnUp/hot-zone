@@ -1,0 +1,10 @@
+{
+  "framework": null,
+  "installCommand": "echo 'no install step'",
+  "buildCommand": "bash pipeline/build.sh",
+  "outputDirectory": "public",
+  "headers": [
+    { "source": "/data/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] },
+    { "source": "/sw.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
+  ]
+}
