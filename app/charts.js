@@ -16,6 +16,7 @@
   // diverging: t in [-1, 1]; blue = low, gray = middle, red = high
   C.div = (t) => { const s = ['--cold-3', '--cold-2', '--cold-1', '--mid', '--hot-1', '--hot-2', '--hot-3'].map(css); return ramp(s, (t + 1) / 2); };
   C.textOn = (rgb) => { const m = rgb.match(/\d+/g); if (!m) return css('--text-primary'); const [r, g, b] = m.map(Number); return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? '#111' : '#fff'; };
+  C.v = (n) => css(n);
   C.series = (i) => css('--s' + (((i % 8) + 8) % 8 + 1));
 
   // Fixed pitch-type colors: color follows the pitch, never its rank.

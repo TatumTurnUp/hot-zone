@@ -1,6 +1,6 @@
 // Offline support: app shell cache-first, data network-first (falls back to last copy offline).
-const V = 'hz-v1';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'charts.js', 'glossary.js', 'manifest.webmanifest', 'icons/icon-192.png'];
+const V = 'hz-v2';
+const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'charts.js', 'glossary.js', 'manifest.webmanifest', 'icons/icon-192.png', 'stats.js'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(V).then((c) => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== V).map((k) => caches.delete(k))))); self.clients.claim(); });
 self.addEventListener('fetch', (e) => {

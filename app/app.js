@@ -1,465 +1,579 @@
-/* Hot Zone — app shell, routing and views. Data lives in /data (built by the pipeline). */
+/* Hot Zone — app shell, search, routing and views. Data lives in /data (built by the pipeline). */
 const APP_NAME = 'Hot Zone';
 const f = C.f, esc = C.esc;
-const state = { index: null, cache: {}, ui: {} };
+const state = { index: null, cache: {}, ui: {}, sheet: null };
 const $main = () => document.getElementById('main');
-const LG = { avg: 0.245, obp: 0.315, slg: 0.405, ops: 0.72, woba: 0.315, xwoba: 0.315, k: 0.225, bb: 0.085, ev: 88.5, era: 4.1, whiff: 0.25 };
+const LG = { avg: 0.245, obp: 0.315, slg: 0.405, ops: 0.72, woba: 0.315, xwoba: 0.315, k: 0.225, bb: 0.085, ev: 88.5, era: 4.1 };
+const TEAM = { atl: { name: 'Atlanta Braves', short: 'Braves', abbr: 'ATL' }, usm: { name: 'Southern Miss', short: 'Golden Eagles', abbr: 'USM' } };
+const ui = (k, d) => (state.ui[k] ?? d);
+const store = { get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
+const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
-// ---------- tooltip + glossary ----------
+// ---------- formatting ----------
+function fmtStat(key, side, v) {
+  const m = (side === 'p' ? STATS.P : STATS.H)[key];
+  if (v == null || v === '') return '—';
+  const t = m ? m.fmt : 'n1';
+  if (t === 'avg') return f.avg(+v);
+  if (t === 'pct') return f.pct(+v);
+  if (t === 'n2') return (+v).toFixed(2);
+  if (t === 'n1') return (+v).toFixed(1);
+  if (t === 'ip') { const o = Math.round(+v * 3); return `${Math.floor(o / 3)}.${o % 3}`; }
+  return Math.round(+v).toString();
+}
+const encKey = (k) => k.replace(/%/g, 'pct').replace(/\+/g, 'plus').replace(/\//g, 'per').replace(/ /g, '').replace(/-/g, 'm');
+function decKey(side, e) { const reg = side === 'p' ? STATS.P : STATS.H; return Object.keys(reg).find((k) => encKey(k) === e); }
+
+// ---------- tooltip ----------
 const tip = () => document.getElementById('tip');
 window.showTip = (html, x, y) => {
   const t = tip(); t.innerHTML = html; t.classList.add('on');
-  const w = t.offsetWidth, h = t.offsetHeight;
-  let left = x + 14, top = y + 14;
-  if (left + w > innerWidth - 8) left = x - w - 14;
-  if (top + h > innerHeight - 8) top = y - h - 14;
-  t.style.left = Math.max(8, left) + 'px'; t.style.top = Math.max(8, top) + 'px';
+  const w = t.offsetWidth, h = t.offsetHeight; let l = x + 14, tp = y + 14;
+  if (l + w > innerWidth - 8) l = x - w - 14; if (tp + h > innerHeight - 8) tp = y - h - 14;
+  t.style.left = Math.max(8, l) + 'px'; t.style.top = Math.max(8, tp) + 'px';
 };
 window.hideTip = () => tip().classList.remove('on');
-document.addEventListener('pointermove', (e) => { const el = e.target.closest && e.target.closest('[data-tip]'); if (el) showTip(el.getAttribute('data-tip'), e.clientX, e.clientY); else if (!e.target.closest('svg .hit')) hideTip(); });
+document.addEventListener('pointermove', (e) => { const el = e.target.closest && e.target.closest('[data-tip]'); if (el) showTip(el.getAttribute('data-tip'), e.clientX, e.clientY); else if (!(e.target.closest && e.target.closest('svg .hit'))) hideTip(); });
 document.addEventListener('pointerdown', (e) => { const el = e.target.closest && e.target.closest('[data-tip]'); if (el) showTip(el.getAttribute('data-tip'), e.clientX, e.clientY); });
-document.addEventListener('click', (e) => {
-  const g = e.target.closest && e.target.closest('[data-gloss]');
-  if (g) { const d = window.gloss(g.getAttribute('data-gloss')); if (d) { const box = document.getElementById('gloss'); box.querySelector('.t').textContent = d[0] + (g.getAttribute('data-gloss') !== d[0] ? ` (${g.getAttribute('data-gloss')})` : ''); box.querySelector('.d').textContent = d[1]; box.classList.add('on'); } }
-});
-const G = (label, key) => `<span data-gloss="${esc(key || label)}">${esc(label)}</span>`;
 
 // ---------- data ----------
-async function getJSON(u) { const r = await fetch(u); if (!r.ok) throw new Error(u + ' ' + r.status); return r.json(); }
+async function getJSON(u) { const r = await fetch(u); if (!r.ok) throw new Error(`${u} (${r.status})`); return r.json(); }
 async function index() { if (!state.index) state.index = await getJSON('data/index.json'); return state.index; }
 async function player(id) { if (!state.cache[id]) state.cache[id] = await getJSON(`data/players/${id}.json`); return state.cache[id]; }
+const byId = (id) => state.index.players.find((p) => p.id === id);
+const qualified = (c, side) => { const m = STATS.MIN[c.team][side]; return side === 'h' ? (c.s['h.PA'] || 0) >= m : (c.s['p.IP'] || 0) >= m; };
+function ranking(team, side, key, qualOnly = true) {
+  const meta = (side === 'p' ? STATS.P : STATS.H)[key]; const k = side + '.' + key;
+  let pool = state.index.players.filter((c) => c.team === team && c.s[k] != null);
+  if (qualOnly && meta && meta.q) pool = pool.filter((c) => qualified(c, side));
+  const dir = meta && meta.better === 'low' ? 1 : -1;
+  return pool.sort((a, b) => dir * (a.s[k] - b.s[k]));
+}
+function rankOf(c, side, key) {
+  const meta = (side === 'p' ? STATS.P : STATS.H)[key]; if (!meta || !meta.better) return null;
+  if (meta.q && !qualified(c, side)) return { unq: true };
+  const list = ranking(c.team, side, key); const i = list.findIndex((x) => x.id === c.id);
+  return i < 0 ? null : { r: i + 1, of: list.length };
+}
+const ord = (n) => n + (['th', 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || ['th', 'st', 'nd', 'rd'][n % 100] || 'th');
 
 // ---------- routing ----------
-function nav(h) { location.hash = h; }
 window.addEventListener('hashchange', route);
 async function route() {
-  hideTip(); document.getElementById('gloss').classList.remove('on');
-  // plain #names (works on Vercel and inside a claude.ai artifact): #team-atl, #p-atl-621566
+  hideTip(); closeSheet(); closePalette();
   const h = location.hash.replace(/^#\/?/, '');
-  let view = '', arg = '';
-  if (h.startsWith('team-') || h.startsWith('team/')) { view = 'team'; arg = h.slice(5); }
-  else if (h.startsWith('p-') || h.startsWith('p/')) { view = 'p'; arg = h.slice(2); }
-  const back = document.getElementById('back');
-  back.style.display = view ? '' : 'none';
+  let m;
   try {
     await index();
-    if (view === 'team') await teamView(arg);
-    else if (view === 'p') await playerView(arg);
+    document.body.className = '';
+    if ((m = h.match(/^team-(atl|usm)$/))) await teamView(m[1]);
+    else if ((m = h.match(/^p-((?:atl|usm)-[0-9a-z]+)(?:-s-([hp])-(.+))?$/))) await playerView(m[1], m[2], m[3]);
+    else if ((m = h.match(/^lead(?:-(atl|usm)-([hp])-(.+))?$/))) leadersView(m[1] || 'atl', m[2] || 'h', m[3] ? decKey(m[2], m[3]) : null);
     else homeView();
-  } catch (e) { $main().innerHTML = `<div class="empty">Couldn't load data (${esc(e.message)}). Check your connection and pull to refresh.</div>`; console.error(e); }
+  } catch (e) { $main().innerHTML = `<div class="empty">This page didn't load: ${esc(e.message)}. Check your connection and reload.</div>`; console.error(e); }
+  markNav(h);
   C.mount();
 }
+function markNav(h) {
+  const tab = h.startsWith('team-atl') || h.startsWith('p-atl') ? 'atl' : h.startsWith('team-usm') || h.startsWith('p-usm') ? 'usm' : h.startsWith('lead') ? 'lead' : 'home';
+  document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === tab));
+}
 
-// ---------- shared bits ----------
-const teamName = (t) => (t === 'atl' ? 'Atlanta Braves' : 'Southern Miss');
-function card(c) {
-  const L = c.line || {};
-  const keys = c.role === 'pitcher' ? ['ERA', 'IP', 'K', c.team === 'atl' ? 'FIP' : 'WHIP'] : ['AVG', 'OPS', 'HR', c.team === 'atl' ? 'wRC+' : 'OPS+'];
-  const fmt = (k, v) => (v == null ? '—' : ['AVG', 'OBP', 'SLG', 'OPS', 'xwOBA', 'wOBA', 'OPP_AVG'].includes(k) ? f.avg(+v) : ['ERA', 'FIP', 'WHIP'].includes(k) ? f.n2(+v) : v);
-  return `<a class="pcard team-${c.team}" href="#p-${c.id}">
-    <div class="jersey">${esc(c.number ?? '')}</div>
-    <div><div class="nm">${esc(c.name)}</div>
-    <div class="meta">${esc(c.pos || '')} · B/T ${esc(c.bats || '?')}/${esc(c.throws || '?')}${c.class_short ? ' · ' + esc(c.class_short) : c.age ? ' · Age ' + c.age : ''}</div>
-    <div class="mini">${keys.map((k) => `<div><div class="k">${k}</div><div class="v">${fmt(k, L[k])}</div></div>`).join('')}</div></div></a>`;
+// ---------- shared pieces ----------
+const av = (c, lg) => `<span class="av t-${c.team} ${lg ? 'lg' : ''}" aria-hidden="true">${esc(c.number ?? '')}</span>`;
+const badge = (t, sm) => `<span class="badge t-${t} ${sm ? 'sm' : ''}" aria-hidden="true">${TEAM[t].abbr}</span>`;
+function spark(vals, color, opt = {}) {
+  const v = vals.map((x) => (x == null ? null : +x)); const ok = v.filter((x) => x != null);
+  if (ok.length < 2) return '';
+  const W = 140, H = opt.h || 30, lo = Math.min(...ok), hi = Math.max(...ok), r = hi - lo || 1;
+  let d = '', pen = false;
+  v.forEach((x, i) => { if (x == null) { pen = false; return; } const px = (i / (v.length - 1)) * W, py = H - 3 - ((x - lo) / r) * (H - 6); d += (pen ? 'L' : 'M') + px.toFixed(1) + ' ' + py.toFixed(1); pen = true; });
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><path d="${d}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
 }
-function kv(rows) { return `<div class="kv">${rows.filter((r) => r).map(([k, v, g]) => `<div><div class="k" data-gloss="${esc(g || k)}">${esc(k)}</div><div class="v">${v ?? '—'}</div></div>`).join('')}</div>`; }
+function chips(group, opts, cur) { return `<div class="chips" role="group">${opts.map(([v, l]) => `<button class="chip ${v === cur ? 'on' : ''}" data-chip="${group}" data-v="${esc(v)}" aria-pressed="${v === cur}">${esc(l)}</button>`).join('')}</div>`; }
+const fig = (title, hint, body, cls = '') => `<div class="fig ${cls}"><h3>${title}</h3>${hint ? `<p class="hint">${hint}</p>` : ''}${body}</div>`;
 function table(cols, rows, opt = {}) {
-  return `<div class="tablewrap" style="${opt.maxH ? 'max-height:' + opt.maxH + 'px' : ''}"><table><thead><tr>${cols.map((c) => `<th data-gloss="${esc(c.g || c.h)}">${esc(c.h)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${cols.map((c) => { const v = c.f ? c.f(r) : r[c.k]; return `<td${c.cls ? ` class="${c.cls(r) || ''}"` : ''}>${v ?? '—'}</td>`; }).join('')}</tr>`).join('')}</tbody></table></div>`;
+  return `<div class="tscroll" style="${opt.maxH ? 'max-height:' + opt.maxH + 'px' : ''}"><table class="tbl"><thead><tr>${cols.map((c) => `<th data-gloss="${esc(c.g || c.h)}">${esc(c.h)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${cols.map((c) => { const v = c.f ? c.f(r) : r[c.k]; return `<td${c.cls ? ` class="${c.cls(r) || ''}"` : ''}>${v ?? '—'}</td>`; }).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
-const panel = (title, hint, body, cls = '') => `<section class="panel ${cls}"><h3>${title}</h3>${hint ? `<p class="hint">${hint}</p>` : ''}${body}</section>`;
-function chips(group, opts, cur, attr = 'data-chip') { return `<div class="chips">${opts.map(([v, l]) => `<button class="chip ${v === cur ? 'on' : ''}" ${attr}="${group}" data-v="${esc(v)}">${esc(l)}</button>`).join('')}</div>`; }
-function bindChips(root, rerender) {
-  root.querySelectorAll('[data-chip]').forEach((b) => b.addEventListener('click', () => { state.ui[b.dataset.chip] = b.dataset.v; rerender(); }));
-}
-const ui = (k, d) => (state.ui[k] ?? d);
+function section(id, title, desc, body) { return `<section class="sec" id="${id}" data-sec="${esc(title)}"><header><div><h2>${title}</h2>${desc ? `<p>${desc}</p>` : ''}</div></header>${body}</section>`; }
 
 // ---------- HOME ----------
 function homeView() {
-  const I = state.index; const T = I.teams;
+  const I = state.index, T = I.teams;
+  const recent = store.get('hz-recent', []).map(byId).filter(Boolean).slice(0, 4);
+  const sugg = [...recent.map((c) => [c.name, `#p-${c.id}`]), ['Olson barrel rate', 'q:olson barrel'], ['ERA leaders', '#lead-atl-p-ERA'], ['Joey Urban', 'q:urban'], ['Fastball velocity', '#lead-atl-p-Velo'], ['Strikeout rate', 'q:strikeout rate']].slice(0, 6);
+  const lastN = (g) => g.filter((x) => !x.gt || x.gt === 'R').slice(-10);
+  const board = (t) => {
+    const games = T[t].games.filter((g) => !g.gt || g.gt === 'R'); let rd = 0; const rdv = games.map((g) => (rd += (g.us ?? 0) - (g.them ?? 0)));
+    return `<a class="board t-${t}" href="#team-${t}" aria-label="${esc(T[t].name)} team page">
+      <div style="display:flex;gap:14px;align-items:center">${badge(t)}<div><div class="bname">${esc(T[t].name)}</div><div class="bsub">${esc(T[t].level)}, ${I.season}${t === 'atl' ? `; ${esc(T.atl.postseason)} in the postseason` : `; ${esc(T.usm.conf_record)} in conference`}</div></div></div>
+      <div class="brec">${esc(T[t].record)}</div>
+      <div class="bspark">${spark(rdv, 'rgba(255,255,255,.85)', { h: 46 })}</div>
+      <div class="last10">Last 10&nbsp; ${lastN(T[t].games).map((g) => `<i style="background:${g.result === 'W' ? '#3ccf6a' : '#ff7a6b'}" title="${g.result} ${g.us}-${g.them}"></i>`).join('')}&nbsp; Run differential ${rd > 0 ? '+' : ''}${rd}</div></a>`;
+  };
+  const leadSet = [['atl', 'h', 'HR'], ['atl', 'p', 'ERA'], ['usm', 'h', 'AVG'], ['atl', 'h', 'xwOBA'], ['usm', 'p', 'K'], ['atl', 'p', 'Whiff%'], ['usm', 'h', 'HR'], ['atl', 'h', 'SprintSpeed']];
   $main().innerHTML = `
-    <div class="hero-title">${APP_NAME}</div>
-    <p class="sub">Every player, every stat — 2026 season. Tap a team, or search any player. Tap any stat name to learn what it means.</p>
-    <div class="teamtiles">
-      ${['atl', 'usm'].map((t) => `<a class="teamtile ${t}" href="#team-${t}"><div class="stripe"></div>
-        <div><div class="tname">${esc(T[t].name)}</div><div class="tmeta">${esc(T[t].level)} · ${I.season}${t === 'atl' ? ' · Postseason ' + T.atl.postseason : ' · Conf ' + T.usm.conf_record}</div></div>
-        <div class="trec">${esc(T[t].record)}</div></a>`).join('')}
+    <div class="homehero">
+      <h1>Find any stat.</h1>
+      <p>Braves and Southern Miss baseball, 2026 season. Search a player, a stat, or both at once, like “Olson barrel rate.”</p>
+      <button class="bigfind" data-open-find>${ICON.search}<span>Search players and stats</span></button>
+      <div class="suggest">${sugg.map(([l, go]) => `<a class="pill" href="${go.startsWith('#') ? go : '#'}" ${go.startsWith('q:') ? `data-q="${esc(go.slice(2))}"` : ''}>${esc(l)}</a>`).join('')}</div>
     </div>
-    <input class="search" id="q" placeholder="Search players (e.g. Olson, Urban, Sale)…" autocomplete="off">
-    <div class="results cards" id="res"></div>
-    <div class="footer">Data: MLB Stats API & Baseball Savant (Braves) · southernmiss.com box scores (Southern Miss)<br>Built ${esc(I.built)} · Proof of concept on the 2026 season</div>`;
-  const q = document.getElementById('q'), res = document.getElementById('res');
-  q.addEventListener('input', () => {
-    const s = q.value.trim().toLowerCase();
-    res.innerHTML = s.length < 2 ? '' : I.players.filter((p) => p.name.toLowerCase().includes(s) || String(p.number) === s).slice(0, 24).map(card).join('') || '<div class="empty">No players found.</div>';
-  });
+    <div class="boards">${board('atl')}${board('usm')}</div>
+    <h2 class="h2">Season leaders</h2><p class="lede">Swipe for more. Tap a name to open the player, or a card to see the full list.</p>
+    <div class="rail">${leadSet.map(([t, s, k]) => leadCard(t, s, k)).join('')}</div>
+    <div class="footer">Data from the MLB Stats API and Baseball Savant (Braves) and southernmiss.com box scores (Southern Miss).<br>Updated ${esc(I.built.replace('T', ' ').replace('Z', ' UTC'))}</div>`;
+}
+function leadCard(t, s, k, n = 5) {
+  const meta = (s === 'p' ? STATS.P : STATS.H)[k]; const list = ranking(t, s, k).slice(0, n);
+  return `<div class="leadcard"><a class="lt" href="#lead-${t}-${s}-${encKey(k)}"><b>${esc(meta.label)}</b><span>${TEAM[t].short}</span></a>
+    ${list.map((c, i) => `<a class="leadrow" href="#p-${c.id}">${av(c)}<span class="n">${esc(c.name)}<small>${esc(c.pos || '')}</small></span><span class="v">${fmtStat(k, s, c.s[s + '.' + k])}</span></a>`).join('')}</div>`;
 }
 
 // ---------- TEAM ----------
+const COLS = {
+  atl: { h: ['G', 'PA', 'AVG', 'OBP', 'SLG', 'HR', 'RBI', 'SB', 'wRC+', 'xwOBA', 'WAR'], p: ['G', 'GS', 'IP', 'ERA', 'FIP', 'WHIP', 'K', 'K%', 'SV', 'Whiff%', 'WAR'] },
+  usm: { h: ['G', 'PA', 'AVG', 'OBP', 'SLG', 'HR', 'RBI', 'SB', 'OPS+', 'K%', 'BB%'], p: ['G', 'GS', 'IP', 'ERA', 'FIP', 'WHIP', 'K', 'K%', 'BB%', 'SV', 'Whiff%'] },
+};
+const HIDE_SM = new Set(['G', 'OBP', 'RBI', 'SB', 'xwOBA', 'WAR', 'GS', 'WHIP', 'K%', 'SV', 'Whiff%', 'BB%', 'OPS+', 'wRC+', 'FIP']);
 async function teamView(t) {
   const I = state.index, T = I.teams[t];
-  const players = I.players.filter((p) => p.team === t);
-  const tab = ui('teamtab-' + t, 'hitters');
-  const sortKey = ui('sort-' + t + tab, tab === 'pitchers' ? 'IP' : 'PA');
-  const games = T.games.filter((g) => !g.gt || g.gt === 'R');
-  let rd = 0; const rdv = games.map((g) => (rd += (g.us ?? 0) - (g.them ?? 0)));
-  const list = players.filter((p) => (tab === 'pitchers' ? p.role !== 'hitter' : p.role !== 'pitcher'));
-  const num = (v) => (v == null || v === '—' ? -Infinity : parseFloat(v));
-  const asc = ['ERA', 'WHIP', 'FIP', 'OPP_AVG'].includes(sortKey);
-  list.sort((a, b) => (sortKey === 'Name' ? a.last.localeCompare(b.last) : sortKey === '#' ? (+a.number || 99) - (+b.number || 99) :
-    asc ? (num(a.line[sortKey]) === -Infinity ? 1 : num(b.line[sortKey]) === -Infinity ? -1 : num(a.line[sortKey]) - num(b.line[sortKey])) : num(b.line[sortKey]) - num(a.line[sortKey])));
-  const sorts = tab === 'pitchers' ? ['IP', 'ERA', 'K', 'WHIP', 'FIP', 'SV', 'W', 'Whiff%', 'Name', '#'] : ['PA', 'AVG', 'OPS', 'HR', 'RBI', 'SB', t === 'atl' ? 'wRC+' : 'OPS+', t === 'atl' ? 'WAR' : 'wOBA', 'Name', '#'];
-  // leaders
-  const lead = (pool, k, n, minK, minV, lowGood) => pool.filter((p) => num(p.line[minK]) >= minV && p.line[k] != null).sort((a, b) => (lowGood ? 1 : -1) * (num(a.line[k]) - num(b.line[k]))).slice(0, n);
-  const hitters = players.filter((p) => p.role !== 'pitcher'), pitchers = players.filter((p) => p.role !== 'hitter');
-  const minPA = t === 'atl' ? 200 : 100, minIP = t === 'atl' ? 50 : 25;
-  const leaderBox = (title, rows, k, fm) => `<div><div style="font-size:12px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px" data-gloss="${k}">${title}</div>${rows.map((p, i) => `<a href="#p-${p.id}" style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--line);font-size:14px"><span>${i + 1}. ${esc(p.name)}</span><b class="num">${fm(p.line[k])}</b></a>`).join('')}</div>`;
+  document.body.classList.add('t-' + t);
+  const side = ui('tside-' + t, 'h');
+  const sortKey = ui(`tsort-${t}-${side}`, side === 'h' ? 'PA' : 'IP'); const asc = ui(`tasc-${t}-${side}`, false);
+  const pos = ui(`tpos-${t}-${side}`, 'All'); const q = ui(`tq-${t}`, '');
+  let list = I.players.filter((c) => c.team === t && (side === 'p' ? c.role !== 'hitter' : c.role !== 'pitcher'));
+  const posOpts = side === 'h' ? ['All', 'C', 'IF', 'OF', 'DH'] : ['All', 'Starters', 'Relievers'];
+  const isIF = (p) => /^(1B|2B|3B|SS|INF|IF)/.test(p || ''); const isOF = (p) => /^(LF|CF|RF|OF)/.test(p || '');
+  if (pos !== 'All') list = list.filter((c) => side === 'p' ? (pos === 'Starters' ? (c.s['p.GS'] || 0) >= 5 : (c.s['p.GS'] || 0) < 5) : pos === 'C' ? c.pos === 'C' : pos === 'IF' ? isIF(c.pos) : pos === 'OF' ? isOF(c.pos) : /DH/.test(c.pos || ''));
+  if (q) list = list.filter((c) => norm(c.name).includes(norm(q)) || String(c.number) === q);
+  const k = side + '.' + sortKey;
+  list.sort((a, b) => { const x = a.s[k], y = b.s[k]; if (x == null) return 1; if (y == null) return -1; return asc ? x - y : y - x; });
+  const games = T.games.filter((g) => !g.gt || g.gt === 'R'); let rd = 0; games.forEach((g) => (rd += (g.us ?? 0) - (g.them ?? 0)));
+  const cols = COLS[t][side];
+  const leadKeys = side === 'h' ? (t === 'atl' ? ['HR', 'AVG', 'xwOBA', 'SB'] : ['AVG', 'HR', 'OPS', 'SB']) : (t === 'atl' ? ['ERA', 'K', 'Whiff%', 'SV'] : ['ERA', 'K', 'WHIP', 'SV']);
   $main().innerHTML = `
-    <div class="profile ${t}" style="margin-bottom:14px"><div class="bar"></div>
-      <div class="pname">${esc(T.name)}</div><div class="ppos">${esc(T.level)} · 2026 season</div>
-      <div class="headline">
-        <div class="tile"><div class="k">Record</div><div class="v">${esc(T.record)}</div></div>
-        ${t === 'atl' ? `<div class="tile"><div class="k">Postseason</div><div class="v">${esc(T.postseason)}</div></div>` : `<div class="tile"><div class="k">Conference</div><div class="v">${esc(T.conf_record)}</div></div>
-        <div class="tile"><div class="k" data-gloss="AVG">Team AVG</div><div class="v">${f.avg(T.hitting.AVG)}</div></div><div class="tile"><div class="k" data-gloss="OPS">Team OPS</div><div class="v">${f.avg(T.hitting.OPS)}</div></div><div class="tile"><div class="k" data-gloss="ERA">Team ERA</div><div class="v">${f.n2(T.pitching.ERA)}</div></div>`}
-        <div class="tile"><div class="k">Run diff</div><div class="v">${rd > 0 ? '+' : ''}${rd}</div></div>
-      </div></div>
-    <div class="grid2">
-      ${panel('Every game', 'Green = win, red = loss. Taller bars = bigger margin. Tap a bar for the score.', C.strip(games), 'full')}
-      ${panel('Run differential over the season', 'Runs scored minus runs allowed, added up game by game.', C.line({ series: [{ name: 'Run differential', color: C.series(0), values: rdv }], labels: games.map((g) => g.date), fmt: (v) => (v > 0 ? '+' : '') + Math.round(v), ref: 0, height: 220, extra: (i) => `<br>${games[i].home ? 'vs' : '@'} ${esc(games[i].opp)} ${games[i].result} ${games[i].us}-${games[i].them}` }), 'full')}
-      ${panel('Team leaders', `Minimum ${minPA} PA / ${minIP} IP.`, `<div class="grid2" style="gap:16px">
-        ${leaderBox('Batting average', lead(hitters, 'AVG', 5, 'PA', minPA), 'AVG', f.avg)}
-        ${leaderBox('Home runs', lead(hitters, 'HR', 5, 'PA', 1), 'HR', f.int)}
-        ${leaderBox('ERA', lead(pitchers, 'ERA', 5, 'IP', minIP, true), 'ERA', f.n2)}
-        ${leaderBox('Strikeouts', lead(pitchers, 'K', 5, 'IP', 1), 'K', f.int)}</div>`, 'full')}
+    <div class="teamhead">${badge(t)}<div><h1>${esc(T.name)}</h1><div class="meta">${esc(T.level)}, ${I.season} season</div></div>
+      <div class="scoreline"><div><b>${esc(T.record)}</b><span>Record</span></div>${t === 'atl' ? `<div><b>${esc(T.postseason)}</b><span>Postseason</span></div>` : `<div><b>${esc(T.conf_record)}</b><span>Conference</span></div>`}<div><b>${rd > 0 ? '+' : ''}${rd}</b><span>Run differential</span></div></div></div>
+    <div class="rail" style="margin-bottom:22px">${leadKeys.map((lk) => leadCard(t, side, lk, 3)).join('')}</div>
+    <div class="toolbar">
+      <div class="seg" role="tablist">${[['h', 'Hitters'], ['p', 'Pitchers']].map(([v, l]) => `<button role="tab" class="${side === v ? 'on' : ''}" data-tside="${v}" aria-selected="${side === v}">${l}</button>`).join('')}</div>
+      <div class="chips" style="margin:0">${posOpts.map((o) => `<button class="chip ${o === pos ? 'on' : ''}" data-tpos="${o}">${o}</button>`).join('')}</div>
+      <input class="filter" id="tq" placeholder="Filter by name or number" value="${esc(q)}" autocomplete="off">
     </div>
-    <div class="tabs">${[['hitters', `Hitters (${hitters.length})`], ['pitchers', `Pitchers (${pitchers.length})`]].map(([v, l]) => `<button class="tab ${tab === v ? 'on' : ''}" data-tab="${v}">${l}</button>`).join('')}</div>
-    <div class="sortbar"><span style="color:var(--text-secondary);font-size:13px">Sort by</span><select id="sort">${sorts.map((s) => `<option ${s === sortKey ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
-    <div class="cards" style="margin-top:12px">${list.map(card).join('')}</div>`;
-  document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { state.ui['teamtab-' + t] = b.dataset.tab; route(); }));
-  document.getElementById('sort').addEventListener('change', (e) => { state.ui['sort-' + t + tab] = e.target.value; route(); });
+    <div class="tablewrap"><table class="roster"><thead><tr><th data-sort="Name">Player</th>${cols.map((c) => `<th data-sort="${esc(c)}" class="${c === sortKey ? 'on' + (asc ? ' asc' : '') : ''} ${HIDE_SM.has(c) ? 'hide-sm' : ''}" title="${esc(((side === 'p' ? STATS.P : STATS.H)[c] || {}).label || c)}">${esc(c)}</th>`).join('')}</tr></thead>
+    <tbody>${list.map((c) => `<tr data-go="#p-${c.id}"><td><span class="who">${av(c)}<span>${esc(c.name)}<small>${esc(c.pos || '')}, ${esc(c.bats || '?')}/${esc(c.throws || '?')}${c.class_short ? ', ' + esc(c.class_short) : ''}</small></span></span></td>${cols.map((col) => `<td class="${col === sortKey ? 'sorted' : ''} ${HIDE_SM.has(col) ? 'hide-sm' : ''}">${fmtStat(col, side, c.s[side + '.' + col])}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${cols.length + 1}" class="empty">No players match. Clear the filter to see everyone.</td></tr>`}</tbody></table></div>
+    <p class="note">Tap a column to sort; tap again to flip. On phones, swipe the table sideways for more columns.</p>`;
+  const rr = () => { teamView(t); C.mount(); };
+  $main().querySelectorAll('[data-tside]').forEach((b) => (b.onclick = () => { state.ui['tside-' + t] = b.dataset.tside; rr(); }));
+  $main().querySelectorAll('[data-tpos]').forEach((b) => (b.onclick = () => { state.ui[`tpos-${t}-${side}`] = b.dataset.tpos; rr(); }));
+  $main().querySelectorAll('[data-sort]').forEach((th) => (th.onclick = () => { const s = th.dataset.sort; if (s === 'Name') return; if (s === sortKey) state.ui[`tasc-${t}-${side}`] = !asc; else { state.ui[`tsort-${t}-${side}`] = s; state.ui[`tasc-${t}-${side}`] = ['ERA', 'FIP', 'WHIP', 'BB%', 'K%'].includes(s) && side === 'p' ? s !== 'K%' : false; } rr(); }));
+  $main().querySelectorAll('[data-go]').forEach((tr) => (tr.onclick = () => (location.hash = tr.dataset.go)));
+  const inp = document.getElementById('tq'); inp.oninput = () => { state.ui[`tq-${t}`] = inp.value; const pos0 = inp.selectionStart; rr(); const n = document.getElementById('tq'); n.focus(); n.setSelectionRange(pos0, pos0); };
+}
+
+// ---------- LEADERS ----------
+function leadersView(t, side, key) {
+  const reg = side === 'p' ? STATS.P : STATS.H;
+  key = key || (side === 'p' ? 'ERA' : 'HR');
+  const meta = reg[key];
+  const qual = ui('lead-q', true);
+  const list = ranking(t, side, key, qual);
+  const max = Math.max(...list.map((c) => Math.abs(c.s[side + '.' + key] || 0)), 1e-9);
+  const avail = Object.keys(reg).filter((k) => state.index.players.some((c) => c.team === t && c.s[side + '.' + k] != null));
+  const g = window.gloss(meta.g || key);
+  $main().innerHTML = `
+    <div class="homehero" style="padding-bottom:12px"><h1 style="font-size:clamp(34px,6vw,56px)">${esc(meta.label)} leaders</h1><p>${esc(g ? g[1] : '')}</p></div>
+    <div class="toolbar">
+      <div class="seg">${['atl', 'usm'].map((x) => `<button class="${x === t ? 'on' : ''}" data-lt="${x}">${TEAM[x].short}</button>`).join('')}</div>
+      <div class="seg">${[['h', 'Hitting'], ['p', 'Pitching']].map(([v, l]) => `<button class="${v === side ? 'on' : ''}" data-ls="${v}">${l}</button>`).join('')}</div>
+      <select id="lstat" aria-label="Choose a stat" style="height:42px;border-radius:12px;background:var(--panel);color:var(--ink);border:1px solid var(--rule);padding:0 12px;font:inherit">${avail.map((k) => `<option value="${esc(k)}" ${k === key ? 'selected' : ''}>${esc(reg[k].label)}</option>`).join('')}</select>
+      ${meta.q ? `<button class="chip ${qual ? 'on' : ''}" data-lq>${qual ? `Qualified only (${STATS.MIN[t][side]}+ ${side === 'h' ? 'PA' : 'IP'})` : 'Showing everyone'}</button>` : ''}
+    </div>
+    <div style="display:grid;gap:2px;margin-top:8px">${list.map((c, i) => { const v = c.s[side + '.' + key]; return `<a class="leadrow" href="#p-${c.id}-s-${side}-${encKey(key)}" style="grid-template-columns:34px 34px minmax(0,1fr) minmax(70px,30%) 70px;padding:8px 4px">
+      <span class="num" style="color:var(--ink-3);font-size:18px">${i + 1}</span>${av(c)}<span class="n">${esc(c.name)}<small>${esc(c.pos || '')}</small></span>
+      <span style="height:10px;background:var(--panel);border-radius:5px;overflow:hidden"><span style="display:block;height:100%;width:${(Math.abs(v) / max) * 100}%;background:${i === 0 ? 'var(--amber)' : 'var(--s1)'};border-radius:5px"></span></span>
+      <span class="v" style="text-align:right">${fmtStat(key, side, v)}</span></a>`; }).join('') || '<div class="empty">Nobody qualifies yet. Turn off "Qualified only" to see everyone.</div>'}</div>`;
+  const go = (tt, ss, kk) => (location.hash = `lead-${tt}-${ss}-${encKey(kk)}`);
+  $main().querySelectorAll('[data-lt]').forEach((b) => (b.onclick = () => { const r2 = side === 'p' ? STATS.P : STATS.H; const k2 = state.index.players.some((c) => c.team === b.dataset.lt && c.s[side + '.' + key] != null) ? key : (side === 'p' ? 'ERA' : 'HR'); go(b.dataset.lt, side, k2); }));
+  $main().querySelectorAll('[data-ls]').forEach((b) => (b.onclick = () => { const r2 = b.dataset.ls === 'p' ? STATS.P : STATS.H; go(t, b.dataset.ls, r2[key] && state.index.players.some((c) => c.team === t && c.s[b.dataset.ls + '.' + key] != null) ? key : (b.dataset.ls === 'p' ? 'ERA' : 'HR')); }));
+  document.getElementById('lstat').onchange = (e) => go(t, side, e.target.value);
+  const lq = $main().querySelector('[data-lq]'); if (lq) lq.onclick = () => { state.ui['lead-q'] = !qual; leadersView(t, side, key); };
 }
 
 // ---------- PLAYER ----------
-async function playerView(id) {
-  const p = await player(id);
+const KEYS = { atl: { h: ['AVG', 'OBP', 'SLG', 'HR', 'wRC+', 'xwOBA', 'Barrel%', 'K%', 'WAR'], p: ['ERA', 'FIP', 'IP', 'K', 'K%', 'Whiff%', 'WHIP', 'xwOBA', 'Velo'] },
+  usm: { h: ['AVG', 'OBP', 'SLG', 'HR', 'OPS+', 'wOBA', 'K%', 'BB%', 'Whiff%'], p: ['ERA', 'FIP', 'IP', 'K', 'K%', 'BB%', 'WHIP', 'Strike%', 'Whiff%'] } };
+function series(p, side, trend) {
+  const B = side === 'p' ? p.pitching : p.hitting; if (!B || !trend) return null;
+  const rows = B.cumulative || []; if (!rows.length || !(trend in rows[rows.length - 1])) return null;
+  return { labels: rows.map((r) => r.date), values: rows.map((r) => r[trend]) };
+}
+async function playerView(id, openSide, openKey) {
+  const p = await player(id); const c = byId(id);
+  document.body.classList.add('t-' + p.team);
+  const recent = store.get('hz-recent', []).filter((x) => x !== id); recent.unshift(id); store.set('hz-recent', recent.slice(0, 8));
   const both = p.hitting && p.pitching;
-  const side = both ? ui('side-' + id, p.role === 'pitcher' ? 'pitching' : 'hitting') : p.pitching && (p.role === 'pitcher' || !p.hitting) ? 'pitching' : 'hitting';
-  const tab = ui('ptab', 'overview');
-  const tabs = [['overview', 'Overview'], ['charts', 'Charts'], ['splits', 'Splits'], ['log', 'Game log'], ['all', 'All stats']];
-  $main().innerHTML = profileCard(p, side) +
-    (both ? chips('side-' + id, [['hitting', 'Hitting'], ['pitching', 'Pitching']], side) : '') +
-    `<div class="tabs">${tabs.map(([v, l]) => `<button class="tab ${tab === v ? 'on' : ''}" data-ptab="${v}">${l}</button>`).join('')}</div><div id="pbody"></div>`;
-  document.querySelectorAll('[data-ptab]').forEach((b) => b.addEventListener('click', () => { state.ui.ptab = b.dataset.ptab; route(); }));
-  bindChips($main(), route);
-  const body = document.getElementById('pbody');
-  const render = () => {
-    const fn = { overview: overview, charts: charts, splits: splits, log: gamelog, all: allStats }[tab];
-    body.innerHTML = fn(p, side);
-    bindChips(body, () => { render(); C.mount(); });
-    bindLegendToggles(body, () => { render(); C.mount(); });
-  };
-  render();
-}
-
-function profileCard(p, side) {
+  const side = openSide || (both ? ui('side-' + id, p.role === 'pitcher' ? 'p' : 'h') : p.pitching && (p.role === 'pitcher' || !p.hitting) ? 'p' : 'h');
+  const keys = KEYS[p.team][side];
+  const reg = side === 'p' ? STATS.P : STATS.H;
+  const keyHTML = keys.filter((k) => c.s[side + '.' + k] != null).map((k) => {
+    const rk = rankOf(c, side, k), ser = series(p, side, reg[k].trend);
+    return `<button class="key" data-stat="${side}:${esc(k)}"><span class="kl">${esc(reg[k].label)}</span><span class="kv">${fmtStat(k, side, c.s[side + '.' + k])}</span>
+      <span class="kr">${rk && rk.r ? `<b>${ord(rk.r)}</b> of ${rk.of} on the team` : rk && rk.unq ? 'Not enough playing time to rank' : '&nbsp;'}</span>${ser ? spark(ser.values, C.v('--amber')) : '<svg aria-hidden="true"></svg>'}</button>`;
+  }).join('');
   const facts = p.team === 'atl'
-    ? [['Bats/Throws', `${p.bats}/${p.throws}`], ['Age', p.age], ['Height', p.height], ['Weight', p.weight ? p.weight + ' lb' : null], ['Born', p.birthplace], ['MLB debut', p.debut], ['Status', p.status]]
-    : [['Bats/Throws', `${p.bats || '?'}/${p.throws || '?'}`], ['Class', p.class], ['Height', p.height], ['Weight', p.weight ? p.weight + ' lb' : null], ['Hometown', p.hometown], ['Previous school', p.previous_school], ['Games / starts', `${p.games} / ${p.starts}`]];
-  let tiles = [];
-  if (side === 'hitting' && p.hitting) {
-    const h = p.hitting;
-    if (p.team === 'atl') { const s = h.season, sb = h.sabermetrics || {}, sc = h.statcast || {};
-      tiles = [['AVG', f.avg(s.avg)], ['OBP', f.avg(s.obp)], ['SLG', f.avg(s.slg)], ['HR', s.homeRuns], ['RBI', s.rbi], ['SB', s.stolenBases], ['wRC+', f.n0(sb.wRcPlus)], ['WAR', f.n1(sb.war)], ['xwOBA', f.avg(sc.xwoba)], ['Barrel%', f.pct(sc.barrel_pct)]];
-    } else { const s = h.season; tiles = [['AVG', f.avg(s.AVG)], ['OBP', f.avg(s.OBP)], ['SLG', f.avg(s.SLG)], ['HR', s.HR], ['RBI', s.RBI], ['SB', s.SB], ['OPS+', f.n0(s['OPS+'])], ['wOBA', f.avg(s.wOBA)], ['K%', f.pct(s['K%'])], ['BB%', f.pct(s['BB%'])]]; }
-  } else if (p.pitching) {
-    const P = p.pitching;
-    if (p.team === 'atl') { const s = P.season, sb = P.sabermetrics || {}, sc = P.statcast || {};
-      tiles = [['ERA', f.n2(s.era)], ['IP', s.inningsPitched], ['W-L', `${s.wins}-${s.losses}`], ['SV', s.saves], ['K', s.strikeOuts], ['WHIP', f.n2(s.whip)], ['FIP', f.n2(sb.fip)], ['WAR', f.n1(sb.war)], ['K%', f.pct(sc.k_pct)], ['Whiff%', f.pct(sc.whiff_pct)]];
-    } else { const s = P.season; tiles = [['ERA', f.n2(s.ERA)], ['IP', s.IP], ['W-L', `${s.W}-${s.L}`], ['SV', s.SV], ['K', s.K], ['WHIP', f.n2(s.WHIP)], ['FIP', f.n2(s.FIP)], ['K%', f.pct(s['K%'])], ['K-BB%', f.pct(s['K-BB%'])], ['OPP AVG', f.avg(s.OPP_AVG)]]; }
-  }
-  return `<div class="profile ${p.team}"><div class="bignum">${esc(p.number ?? '')}</div><div class="bar"></div>
-    <div class="pname">${esc(p.name)}</div>
-    <div class="ppos">#${esc(p.number ?? '—')} · ${esc(p.pos_name || p.pos || '')} · ${esc(teamName(p.team))} <span class="badge" style="background:rgba(255,255,255,.12);color:#fff">${esc(p.level)}</span></div>
-    <div class="facts">${facts.filter(([, v]) => v).map(([k, v]) => `<div><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('')}</div>
-    <div class="headline">${tiles.map(([k, v]) => `<div class="tile"><div class="k" data-gloss="${esc(k)}">${esc(k)}</div><div class="v">${v ?? '—'}</div></div>`).join('')}</div></div>`;
+    ? [['Bats/throws', `${p.bats}/${p.throws}`], ['Age', p.age], ['Height', p.height], ['Weight', p.weight ? p.weight + ' lb' : null], ['Born', p.birthplace], ['MLB debut', p.debut]]
+    : [['Bats/throws', `${p.bats || '?'}/${p.throws || '?'}`], ['Class', p.class], ['Height', p.height], ['Weight', p.weight ? p.weight + ' lb' : null], ['Hometown', p.hometown], ['Before', p.previous_school]];
+  const secs = buildSections(p, side);
+  $main().innerHTML = `
+    <div class="jersey t-${p.team}">
+      <div><a class="teamlink" href="#team-${p.team}">${badge(p.team, true)} ${esc(TEAM[p.team].name)}</a>
+        <h1>${esc(p.name)}</h1><div class="role">${esc(p.pos_name || p.pos || '')}${p.team === 'usm' ? ', Southern Miss' : ''}${p.status && p.status !== 'Active' ? ` (${esc(p.status)})` : ''}</div>
+        <div class="facts">${facts.filter(([, v]) => v).map(([k, v]) => `<div><span>${esc(k)}</span>${esc(v)}</div>`).join('')}</div></div>
+      <div class="back"><div class="ln">${esc(p.last)}</div><div class="no">${esc(p.number ?? '')}</div></div>
+    </div>
+    ${both ? `<div class="seg sidetoggle">${[['h', 'Hitting'], ['p', 'Pitching']].map(([v, l]) => `<button class="${side === v ? 'on' : ''}" data-pside="${v}">${l}</button>`).join('')}</div>` : ''}
+    <div class="keys">${keyHTML}</div>
+    <nav class="index" aria-label="Sections">${secs.map((s) => `<a href="#${s.id}" data-jump="${s.id}">${esc(s.nav)}</a>`).join('')}</nav>
+    <div id="secs">${secs.map((s) => s.html).join('')}</div>`;
+  $main().querySelectorAll('[data-pside]').forEach((b) => (b.onclick = () => { state.ui['side-' + id] = b.dataset.pside; location.hash = `p-${id}`; route(); }));
+  bindPlayer(p, side);
+  if (openKey) { const k = decKey(openSide, openKey); if (k) setTimeout(() => openStat(id, openSide, k), 60); }
+}
+function bindPlayer(p, side) {
+  const root = $main();
+  root.querySelectorAll('[data-jump]').forEach((a) => (a.onclick = (e) => { e.preventDefault(); document.getElementById(a.dataset.jump).scrollIntoView({ behavior: 'smooth', block: 'start' }); }));
+  // scrollspy
+  const links = [...root.querySelectorAll('[data-jump]')];
+  if (state.spy) state.spy.disconnect();
+  state.spy = new IntersectionObserver((ents) => { ents.forEach((en) => { if (en.isIntersecting) links.forEach((l) => { const on = l.dataset.jump === en.target.id; l.classList.toggle('on', on); if (on) l.scrollIntoView({ block: 'nearest', inline: 'center' }); }); }); }, { rootMargin: '-45% 0px -50% 0px' });
+  root.querySelectorAll('section.sec').forEach((s) => state.spy.observe(s));
+  // per-section re-render for chips/toggles
+  root.querySelectorAll('[data-chip]').forEach((b) => (b.onclick = () => { state.ui[b.dataset.chip] = b.dataset.v; rerenderSection(p, side, b.closest('section').id); }));
+  root.querySelectorAll('[data-pt-toggle]').forEach((b) => (b.onclick = () => { const off = new Set((state.ui['pt-off'] || '').split(',').filter(Boolean)); const v = b.dataset.ptToggle; off.has(v) ? off.delete(v) : off.add(v); state.ui['pt-off'] = [...off].join(','); rerenderSection(p, side, b.closest('section').id); }));
+  root.querySelectorAll('[data-spray]').forEach((b) => (b.onclick = () => { const s = new Set(ui('spray-show', '1B,2B,3B,HR,Out').split(',')); s.has(b.dataset.spray) ? s.delete(b.dataset.spray) : s.add(b.dataset.spray); state.ui['spray-show'] = [...s].join(','); rerenderSection(p, side, b.closest('section').id); }));
+  const sf = document.getElementById('statfind');
+  if (sf) sf.oninput = () => filterStats(sf.value);
+}
+function rerenderSection(p, side, sid) {
+  const s = buildSections(p, side).find((x) => x.id === sid); if (!s) return;
+  const old = document.getElementById(sid); const tmp = document.createElement('div'); tmp.innerHTML = s.html; old.replaceWith(tmp.firstElementChild);
+  bindPlayer(p, side); C.mount();
 }
 
-function bindLegendToggles(root, rerender) {
-  root.querySelectorAll('[data-pt-toggle]').forEach((b) => b.addEventListener('click', () => {
-    const k = 'pt-off'; const off = new Set((state.ui[k] || '').split(',').filter(Boolean)); const v = b.dataset.ptToggle;
-    off.has(v) ? off.delete(v) : off.add(v); state.ui[k] = [...off].join(','); rerender();
-  }));
+// stat list items (tappable when the stat is in the registry)
+function statRows(side, rows) {
+  const reg = side === 'p' ? STATS.P : STATS.H;
+  return `<div class="stats">${rows.filter((r) => r && r[1] != null && r[1] !== '—').map(([label, val, key]) => {
+    const k = key && reg[key] ? key : null;
+    return `<button class="stat" ${k ? `data-stat="${side}:${esc(k)}"` : `data-gloss="${esc(key || label)}"`} data-name="${esc(norm(label + ' ' + (key || '')))}"><span class="sl">${esc(label)}</span><span class="sv">${val}</span></button>`;
+  }).join('')}</div>`;
+}
+function filterStats(q) {
+  const n = norm(q).trim(); let shown = 0;
+  document.querySelectorAll('#s-all .stat').forEach((el) => { const hit = !n || el.dataset.name.includes(n); el.style.display = hit ? '' : 'none'; if (hit) shown++; });
+  document.querySelectorAll('#s-all .statgroup').forEach((g) => { const any = [...g.querySelectorAll('.stat')].some((e) => e.style.display !== 'none'); g.style.display = any ? '' : 'none'; if (g.tagName === 'DETAILS') g.open = !!n && any; });
+  const e = document.getElementById('statnone'); if (e) e.style.display = shown ? 'none' : '';
 }
 
-// ===== OVERVIEW =====
-function overview(p, side) {
-  if (p.team === 'atl') return side === 'hitting' ? atlHitOverview(p) : atlPitOverview(p);
-  return side === 'hitting' ? usmHitOverview(p) : usmPitOverview(p);
+// ===== sections =====
+function buildSections(p, side) {
+  const S = [];
+  const add = (id, nav, title, desc, body) => S.push({ id, nav, html: section(id, title, desc, body) });
+  if (p.team === 'atl' && side === 'h') atlHit(p, add);
+  else if (p.team === 'atl') atlPit(p, add);
+  else if (side === 'h') usmHit(p, add);
+  else usmPit(p, add);
+  add('s-splits', 'Splits', 'Splits', p.team === 'atl' ? 'Lefties vs. righties, home vs. road, runners on and more.' : 'Handedness and innings come from play-by-play; the rest from box scores.', splits(p, side));
+  add('s-games', 'Game log', 'Game log', 'Every game, newest first.', gamelog(p, side));
+  add('s-all', 'All stats', 'Every stat', 'Type to find one. Tap any stat for its definition, team rank and season trend.', allStats(p, side));
+  return S;
 }
-function percentileBlock(p, type) {
+const ZONE_M = [['xwoba', 'xwOBA', 0.315, 0.15, f.avg], ['ba', 'AVG', 0.245, 0.15, f.avg], ['slg', 'SLG', 0.405, 0.3, f.avg], ['swing', 'Swing rate', 0.47, 0.35, (v) => f.pct(v, 0)], ['whiff', 'Whiff rate', 0.25, 0.25, (v) => f.pct(v, 0)], ['pct', 'Share of pitches', 0, 0, (v) => f.pct(v, 0)]];
+function zoneFig(zones, keyName, side, title, hint, metrics = ZONE_M) {
+  const cur = ui(keyName, 'xwoba'); const m = metrics.find((z) => z[0] === cur) || metrics[0];
+  return fig(title, hint + (m[0] === 'pct' ? ' Darker = more pitches.' : ' Red = higher than MLB average, blue = lower.'), chips(keyName, metrics.map((z) => [z[0], z[1]]), m[0]) + C.zoneMap(zones, { key: m[0], mid: m[2], span: m[3], fmt: m[4], seq: m[0] === 'pct', side, minN: m[0] === 'pct' ? 1 : 8 }));
+}
+const HEAT_H = [['pitches', 'Pitches seen'], ['swings', 'Swings'], ['whiffs', 'Whiff rate'], ['hard_hit', 'Hard hits'], ['hits', 'Hits']];
+function percentiles(p, type) {
   const pc = p.percentiles[type];
-  if (!pc) return '<div class="empty">Savant percentile rankings only exist for players with enough playing time to qualify.</div>';
-  const H = p.hitting && p.hitting.statcast || {}, P = p.pitching && p.pitching.statcast || {};
+  if (!pc) return '<p class="hint">Savant percentile ranks only exist for players with enough playing time to qualify.</p>';
+  const H = (p.hitting && p.hitting.statcast) || {}, P = (p.pitching && p.pitching.statcast) || {};
   const rows = type === 'batting'
-    ? [['xwOBA', 'xwoba', f.avg(H.xwoba)], ['xBA', 'xba', f.avg(H.xba)], ['xSLG', 'xslg', f.avg(H.xslg)], ['Avg Exit Velo', 'exit_velocity', H.avg_ev, 'avg EV'], ['Barrel%', 'brl_percent', f.pct(H.barrel_pct)], ['Hard Hit%', 'hard_hit_percent', f.pct(H.hard_hit_pct)],
-      ['Bat Speed', 'bat_speed', p.bat_tracking_lb ? f.n1(p.bat_tracking_lb.avg_bat_speed) : null], ['Squared-up%', 'squared_up_rate', null, 'Contact%'], ['Chase%', 'chase_percent', f.pct(H.chase_pct)], ['Whiff%', 'whiff_percent', f.pct(H.whiff_pct)], ['K%', 'k_percent', f.pct(H.k_pct)], ['BB%', 'bb_percent', f.pct(H.bb_pct)],
-      ['Sprint Speed', 'sprint_speed', p.running.sprint ? f.n1(p.running.sprint.sprint_speed) : null], ['OAA', 'oaa', p.fielding.oaa ? p.fielding.oaa.outs_above_average : null], ['Arm Strength', 'arm_strength', p.fielding.arm ? f.n1(p.fielding.arm.arm_overall) : null]]
-    : [['xERA', 'xera', null, 'ERA'], ['xwOBA', 'xwoba', f.avg(P.xwoba)], ['xBA', 'xba', f.avg(P.xba)], ['FB Velo', 'fb_velocity', null, 'Velo'], ['FB Spin', 'fb_spin', null, 'Spin'], ['Curve Spin', 'curve_spin', null, 'Spin'], ['Avg Exit Velo', 'exit_velocity', P.avg_ev, 'avg EV'],
-      ['Barrel%', 'brl_percent', f.pct(P.barrel_pct)], ['Hard Hit%', 'hard_hit_percent', f.pct(P.hard_hit_pct)], ['Chase%', 'chase_percent', f.pct(P.chase_pct)], ['Whiff%', 'whiff_percent', f.pct(P.whiff_pct)], ['K%', 'k_percent', f.pct(P.k_pct)], ['BB%', 'bb_percent', f.pct(P.bb_pct)]];
-  return rows.map(([l, k, raw, g]) => C.pctBar(l, pc[k] == null ? null : Math.round(pc[k]), raw, g || l)).join('') +
-    `<p class="note">Percentile vs. every MLB ${type === 'batting' ? 'hitter' : 'pitcher'} who qualified (100 = best in MLB). Red = great, blue = poor — already flipped so "good" is always red (e.g. low chase rate = red). From Baseball Savant.</p>`;
+    ? [['xwOBA', 'xwoba', f.avg(H.xwoba), 'xwOBA'], ['xBA', 'xba', f.avg(H.xba), 'xBA'], ['xSLG', 'xslg', f.avg(H.xslg), 'xSLG'], ['Exit velo', 'exit_velocity', H.avg_ev, 'EV'], ['Barrel rate', 'brl_percent', f.pct(H.barrel_pct), 'Barrel%'], ['Hard-hit rate', 'hard_hit_percent', f.pct(H.hard_hit_pct), 'HardHit%'],
+      ['Bat speed', 'bat_speed', p.bat_tracking_lb ? f.n1(p.bat_tracking_lb.avg_bat_speed) : null, 'BatSpeed'], ['Chase rate', 'chase_percent', f.pct(H.chase_pct), 'Chase%'], ['Whiff rate', 'whiff_percent', f.pct(H.whiff_pct), 'Whiff%'], ['K rate', 'k_percent', f.pct(H.k_pct), 'K%'], ['BB rate', 'bb_percent', f.pct(H.bb_pct), 'BB%'],
+      ['Sprint speed', 'sprint_speed', p.running.sprint ? f.n1(p.running.sprint.sprint_speed) : null, 'SprintSpeed'], ['Outs above avg', 'oaa', p.fielding.oaa ? p.fielding.oaa.outs_above_average : null, 'OAA'], ['Arm strength', 'arm_strength', p.fielding.arm ? f.n1(p.fielding.arm.arm_overall) : null, null]]
+    : [['xERA', 'xera', null, null], ['xwOBA', 'xwoba', f.avg(P.xwoba), 'xwOBA'], ['xBA', 'xba', f.avg(P.xba), 'xBA'], ['FB velo', 'fb_velocity', null, 'Velo'], ['FB spin', 'fb_spin', null, null], ['Curve spin', 'curve_spin', null, null], ['Exit velo', 'exit_velocity', P.avg_ev, 'EV'],
+      ['Barrel rate', 'brl_percent', f.pct(P.barrel_pct), 'Barrel%'], ['Hard-hit rate', 'hard_hit_percent', f.pct(P.hard_hit_pct), 'HardHit%'], ['Chase rate', 'chase_percent', f.pct(P.chase_pct), 'Chase%'], ['Whiff rate', 'whiff_percent', f.pct(P.whiff_pct), 'Whiff%'], ['K rate', 'k_percent', f.pct(P.k_pct), 'K%'], ['BB rate', 'bb_percent', f.pct(P.bb_pct), 'BB%']];
+  const side = type === 'batting' ? 'h' : 'p';
+  return rows.map(([l, k, raw, sk]) => { const v = pc[k]; if (v == null) return ''; const pct = Math.round(v); const col = C.div((pct - 50) / 50);
+    return `<button class="pct" ${sk ? `data-stat="${side}:${esc(sk)}"` : ''}><span class="k">${esc(l)}</span><span class="track"><span class="fill" style="width:${pct}%;background:${col}"></span><span class="dot" style="left:${Math.max(4, Math.min(96, pct))}%;background:${col};color:${C.textOn(col)}">${pct}</span></span><span class="raw">${raw ?? ''}</span></button>`; }).join('') +
+    `<p class="note">Rank against every qualified MLB ${type === 'batting' ? 'hitter' : 'pitcher'}; 100 is best. Red means good, blue means poor, already flipped so a low chase rate shows red.</p>`;
 }
-function atlHitOverview(p) {
-  const h = p.hitting, s = h.season, sc = h.statcast || {}, sb = h.sabermetrics || {}, adv = h.advanced || {}, bt = p.bat_tracking_lb || {}, sp = p.running.sprint || {};
-  return `<div class="grid2">
-    ${panel('Savant percentile rankings', '', percentileBlock(p, 'batting'))}
-    ${panel('Quality of contact (Statcast)', 'How hard and how well he hits the ball.', kv([['Avg exit velo', sc.avg_ev ? sc.avg_ev + ' mph' : null, 'avg EV'], ['Max exit velo', sc.max_ev ? sc.max_ev + ' mph' : null, 'max EV'], ['EV50', sc.ev50, 'EV50'], ['Avg launch angle', sc.avg_la != null ? sc.avg_la + '°' : null, 'LA'],
-      ['Barrel%', f.pct(sc.barrel_pct)], ['Barrels', sc.barrels, 'Barrel%'], ['Hard Hit%', f.pct(sc.hard_hit_pct)], ['Sweet Spot%', f.pct(sc.sweet_spot_pct)], ['xBA', f.avg(sc.xba)], ['xSLG', f.avg(sc.xslg)], ['xwOBA', f.avg(sc.xwoba)], ['xwOBAcon', f.avg(sc.xwobacon)],
-      ['GB%', f.pct(sc.gb_pct)], ['LD%', f.pct(sc.ld_pct)], ['FB%', f.pct(sc.fb_pct)], ['PU%', f.pct(sc.pu_pct)], ['Pull%', f.pct(sc.pull_pct)], ['Oppo%', f.pct(sc.oppo_pct)], ['Max distance', sc.max_distance ? sc.max_distance + ' ft' : null, 'HR']]))}
-    ${panel('Plate discipline', 'What he swings at and how often he misses.', kv([['Swing%', f.pct(sc.swing_pct)], ['Whiff%', f.pct(sc.whiff_pct)], ['Chase%', f.pct(sc.chase_pct)], ['Z-Swing%', f.pct(sc.zone_swing_pct)], ['Z-Contact%', f.pct(sc.zone_contact_pct)], ['1st Swing%', f.pct(sc.first_pitch_swing_pct)], ['K%', f.pct(sc.k_pct)], ['BB%', f.pct(sc.bb_pct)], ['P/PA', sc.pitches_per_pa], ['Run Value', sc.run_value]]))}
-    ${panel('Swing & speed', 'Bat tracking (Savant leaderboard) and running.', kv([['Bat Speed', bt.avg_bat_speed ? f.n1(bt.avg_bat_speed) + ' mph' : sc.bat_speed], ['Fast Swing%', bt.hard_swing_rate != null ? f.pct(bt.hard_swing_rate) : f.pct(sc.fast_swing_pct)], ['Swing Length', bt.swing_length ? f.n1(bt.swing_length) + ' ft' : sc.swing_length], ['Attack Angle', sc.attack_angle != null ? sc.attack_angle + '°' : null],
-      ['Squared-up %', bt.squared_up_per_swing != null ? f.pct(bt.squared_up_per_swing) : null, 'Contact%'], ['Blasts / swing', bt.blast_per_swing != null ? f.pct(bt.blast_per_swing) : null, 'Barrel%'], ['Sprint Speed', sp.sprint_speed ? sp.sprint_speed + ' ft/s' : null], ['Home to 1st', sp.hp_to_1b ? sp.hp_to_1b + ' s' : null, 'Sprint Speed'], ['Bolts (30+ ft/s)', sp.bolts, 'Sprint Speed'], ['SB-CS', `${s.stolenBases ?? 0}-${s.caughtStealing ?? 0}`, 'SB']]))}
-    ${panel('Season line', '', kv([['G', s.gamesPlayed], ['PA', s.plateAppearances], ['AB', s.atBats], ['H', s.hits], ['2B', s.doubles], ['3B', s.triples], ['HR', s.homeRuns], ['R', s.runs], ['RBI', s.rbi], ['BB', s.baseOnBalls], ['K', s.strikeOuts], ['AVG', f.avg(s.avg)], ['OBP', f.avg(s.obp)], ['SLG', f.avg(s.slg)], ['OPS', f.avg(s.ops)], ['ISO', f.avg(adv.iso)], ['BABIP', f.avg(s.babip)], ['wOBA', f.avg(sb.woba)], ['wRC+', f.n0(sb.wRcPlus)], ['WAR', f.n1(sb.war)]]), 'full')}
-    ${careerPanel(p)}</div>`;
+const resLeg = () => `<div class="legend">${[['single', 'Single'], ['double', 'Double'], ['triple', 'Triple'], ['home_run', 'Home run'], ['field_out', 'Out']].map(([e, l]) => `<span><span class="sw" style="background:${C.resultColor(e)}"></span>${l}</span>`).join('')}</div>`;
+
+function atlHit(p, add) {
+  const h = p.hitting, sc = h.statcast || {}, s = h.season;
+  add('s-summary', 'Summary', 'How he stacks up', 'Percentile ranks from Baseball Savant, plus his season line.', `<div class="viz">
+    ${fig('Percentile ranks', '', percentiles(p, 'batting'))}
+    ${fig('Season line', '', statRows('h', [['Games', s.gamesPlayed, 'G'], ['Plate appearances', s.plateAppearances, 'PA'], ['Hits', s.hits, 'H'], ['Doubles', s.doubles, '2B'], ['Home runs', s.homeRuns, 'HR'], ['Runs batted in', s.rbi, 'RBI'], ['Runs', s.runs, 'R'], ['Walks', s.baseOnBalls, 'BB'], ['Strikeouts', s.strikeOuts, 'K'], ['Stolen bases', s.stolenBases, 'SB'], ['Batting average', f.avg(s.avg), 'AVG'], ['On-base %', f.avg(s.obp), 'OBP'], ['Slugging %', f.avg(s.slg), 'SLG'], ['OPS', f.avg(s.ops), 'OPS'], ['wRC+', f.n0((h.sabermetrics || {}).wRcPlus), 'wRC+'], ['WAR', f.n1((h.sabermetrics || {}).war), 'WAR']]))}</div>`);
+  if (!h.statcast) return;
+  add('s-zone', 'Strike zone', 'Strike zone', 'Where pitchers attacked him and what happened, from catcher’s view.', `<div class="viz swipe">
+    ${zoneFig(h.zones, 'zm-h', p.bats, 'Hot and cold zones', 'Results in each of the 13 Statcast zones.')}
+    ${(() => { const cur = ui('hm-h', 'pitches'); return fig('Pitch locations', 'Every pitch he saw. Switch to see where he swings, misses and hits it hard.', chips('hm-h', HEAT_H, cur) + C.heat(h.heat, { mat: cur, rateOf: cur === 'whiffs' ? 'swings' : null, szTop: p.sz_top || 3.4, szBot: p.sz_bot || 1.6, label: cur.replace('_', ' ') })); })()}
+    ${fig('Count by count', 'wOBA in plate appearances that ended in each count. Red = he did damage.', C.countGrid((b, st) => { const d = h.counts[b + '-' + st]; return d && { n: d.pa_end, v: d.woba, tip: `${d.pa_end} PAs ended here<br>wOBA ${f.avg(d.woba)}, swing ${f.pct(d.swing)}, whiff ${f.pct(d.whiff)}` }; }, { fmt: f.avg }))}</div>`);
+  const show = new Set(ui('spray-show', '1B,2B,3B,HR,Out').split(','));
+  const evla = (h.spray || []).map(([x, y, ev, la, e, bt, dt]) => ({ x: la, y: ev, c: C.resultColor(e), o: ['single', 'double', 'triple', 'home_run'].includes(e) ? 0.9 : 0.35, tip: `<b>${(e || '').replace(/_/g, ' ')}</b>, ${dt}<br>${ev} mph at ${la}°` }));
+  const vpt = (h.vs_pitch_type || []).filter((x) => x.n >= 40);
+  add('s-contact', 'Batted balls', 'Batted balls', `All ${h.spray.length} balls he put in play, tracked by Statcast.`, `<div class="viz swipe">
+    ${fig('Spray chart', 'Tap a dot for exit velocity, launch angle and distance.', `<div class="chips">${['1B', '2B', '3B', 'HR', 'Out'].map((k) => `<button class="chip ${show.has(k) ? 'on' : ''}" data-spray="${k}">${k === 'Out' ? 'Outs' : k}</button>`).join('')}</div>` + resLeg() + C.spray(h.spray, { show }))}
+    ${fig('Exit velocity vs. launch angle', 'The shaded band is the 8°–32° sweet spot; above the dashed line is 95+ mph.', resLeg() + C.scatter({ pts: evla, xr: [-60, 80], yr: [40, 120], xl: 'Launch angle (°)', yl: 'Exit velocity (mph)', bands: [{ x0: 8, x1: 32, label: 'sweet spot' }], guides: [{ y: 95, label: '95 mph' }] }))}
+    ${fig('Against each pitch type', 'Expected wOBA (min 40 pitches). Longer bar = more damage.', C.bars(vpt.map((x) => ({ k: x.name, v: x.xwoba, d: f.avg(x.xwoba), c: C.ptColor(x.type), sw: C.ptColor(x.type), tip: `<b>${esc(x.name)}</b><br>${x.n} seen (${f.pct(x.usage)})<br>AVG ${f.avg(x.ba)}, SLG ${f.avg(x.slg)}, whiff ${f.pct(x.whiff_pct)}` })), { max: 0.6, lw: 120 }))}
+    ${fig('Contact quality', '', statRows('h', [['Avg exit velocity', sc.avg_ev, 'EV'], ['Max exit velocity', sc.max_ev, 'maxEV'], ['Barrel rate', f.pct(sc.barrel_pct), 'Barrel%'], ['Hard-hit rate', f.pct(sc.hard_hit_pct), 'HardHit%'], ['Sweet-spot rate', f.pct(sc.sweet_spot_pct), 'SweetSpot%'], ['Avg launch angle', sc.avg_la, 'LA'], ['Ground-ball rate', f.pct(sc.gb_pct), 'GB%'], ['Fly-ball rate', f.pct(sc.fb_pct), 'FB%'], ['Pull rate', f.pct(sc.pull_pct), 'Pull%'], ['Expected AVG', f.avg(sc.xba), 'xBA'], ['Expected SLG', f.avg(sc.xslg), 'xSLG'], ['Expected wOBA', f.avg(sc.xwoba), 'xwOBA']]))}</div>`);
+  const RM = { ops: ['OPS', f.avg, LG.ops], xwoba: ['xwOBA', f.avg, LG.xwoba], avg: ['AVG', f.avg, LG.avg], k_pct: ['K rate', (v) => f.pct(v), LG.k], bb_pct: ['BB rate', (v) => f.pct(v), LG.bb], avg_ev: ['Exit velo', f.n1, LG.ev], hard_hit_pct: ['Hard-hit rate', (v) => f.pct(v), 0.4] };
+  const rm = ui('roll-h', 'ops'); const roll = h.rolling_15g || [], cum = h.cumulative || [];
+  add('s-trend', 'Trends', 'How his season moved', 'Hot streaks, slumps and how the slash line settled.', `<div class="viz wide">
+    ${fig('Rolling 15 games', 'Each point adds up his last 15 games. Dashed line = MLB average.', chips('roll-h', Object.entries(RM).map(([k, v]) => [k, v[0]]), rm) + C.line({ series: [{ name: RM[rm][0], color: C.v('--amber'), values: roll.map((r) => r[rm]) }], labels: roll.map((r) => r.date), fmt: RM[rm][1], ref: RM[rm][2], refLabel: 'MLB avg' }))}
+    ${fig('Season to date', 'AVG, OBP and SLG after every game.', C.line({ series: [{ name: 'AVG', color: C.series(0), values: cum.map((r) => r.avg) }, { name: 'OBP', color: C.series(1), values: cum.map((r) => r.obp) }, { name: 'SLG', color: C.series(2), values: cum.map((r) => r.slg) }], labels: cum.map((r) => r.date), fmt: f.avg }))}</div>`);
 }
-function atlPitOverview(p) {
-  const P = p.pitching, s = P.season, sc = P.statcast || {}, sb = P.sabermetrics || {}, adv = P.advanced || {};
-  return `<div class="grid2">
-    ${panel('Savant percentile rankings', '', percentileBlock(p, 'pitching'))}
-    ${panel('Arsenal at a glance', 'How often he throws each pitch.', arsenalBars(P))}
-    ${panel('Stuff & results (Statcast)', '', kv([['Whiff%', f.pct(sc.whiff_pct)], ['CSW%', f.pct(sc.csw_pct)], ['Chase%', f.pct(sc.chase_pct)], ['Zone%', f.pct(sc.zone_pct)], ['F-Strike%', f.pct(sc.first_pitch_strike_pct)], ['K%', f.pct(sc.k_pct)], ['BB%', f.pct(sc.bb_pct)], ['xwOBA', f.avg(sc.xwoba)], ['xBA', f.avg(sc.xba)], ['Avg EV allowed', sc.avg_ev, 'avg EV'], ['Barrel%', f.pct(sc.barrel_pct)], ['Hard Hit%', f.pct(sc.hard_hit_pct)], ['GB%', f.pct(sc.gb_pct)], ['Run Value', sc.run_value]]))}
-    ${panel('Season line', '', kv([['G', s.gamesPlayed], ['GS', s.gamesStarted], ['IP', s.inningsPitched], ['W', s.wins], ['L', s.losses], ['SV', s.saves], ['HLD', s.holds], ['ERA', f.n2(s.era)], ['FIP', f.n2(sb.fip)], ['xFIP', f.n2(sb.xfip)], ['WHIP', f.n2(s.whip)], ['K', s.strikeOuts], ['BB', s.baseOnBalls], ['HR', s.homeRuns], ['K/9', f.n2(s.strikeoutsPer9Inn)], ['BB/9', f.n2(s.walksPer9Inn)], ['K-BB%', f.pct(adv.strikeoutsMinusWalksPercentage)], ['OPP AVG', f.avg(s.avg)], ['BABIP', f.avg(adv.babip)], ['QS', adv.qualityStarts], ['P/IP', f.n1(s.pitchesPerInning)], ['WAR', f.n1(sb.war)]]), 'full')}
-    ${careerPanel(p)}</div>`;
-}
-function careerPanel(p) {
-  const rows = (p.career || []).filter((r) => r.level === 'MLB');
-  if (!rows.length) return '';
-  const pit = p.role === 'pitcher';
-  const cols = pit ? [{ h: 'Season', k: 'season' }, { h: 'Team', k: 'team' }, { h: 'G', k: 'gamesPlayed' }, { h: 'IP', k: 'inningsPitched' }, { h: 'ERA', f: (r) => f.n2(r.era) }, { h: 'K', k: 'strikeOuts' }, { h: 'BB', k: 'baseOnBalls' }, { h: 'WHIP', f: (r) => f.n2(r.whip) }]
-    : [{ h: 'Season', k: 'season' }, { h: 'Team', k: 'team' }, { h: 'G', k: 'gamesPlayed' }, { h: 'PA', k: 'plateAppearances' }, { h: 'HR', k: 'homeRuns' }, { h: 'AVG', f: (r) => f.avg(r.avg) }, { h: 'OBP', f: (r) => f.avg(r.obp) }, { h: 'SLG', f: (r) => f.avg(r.slg) }, { h: 'OPS', f: (r) => f.avg(r.ops) }];
-  return panel('MLB career by season', '', table(cols, rows), 'full');
-}
-function arsenalBars(P) {
-  return C.bars((P.arsenal || []).map((a) => ({ k: a.name || a.type, v: a.usage, d: f.pct(a.usage), c: C.ptColor(a.type), sw: C.ptColor(a.type), tip: `<b>${esc(a.name)}</b><br>${a.n} thrown · ${a.velo} mph avg (max ${a.velo_max})<br>Whiff% ${f.pct(a.whiff_pct)} · xwOBA ${f.avg(a.xwoba)}` })), { max: 1, lw: 120 });
-}
-function usmNote(p) { return `<p class="note">${(p.notes || []).map(esc).join(' ')}</p>`; }
-function usmHitOverview(p) {
-  const h = p.hitting, s = h.season, pd = h.plate_discipline, sp = h.spray, dir = h.direction || {};
-  return `<div class="grid2">
-    ${panel('Season line', '', kv([['G', s.G], ['GS', s.GS], ['PA', s.PA], ['AB', s.AB], ['H', s.H], ['2B', s['2B']], ['3B', s['3B']], ['HR', s.HR], ['R', s.R], ['RBI', s.RBI], ['BB', s.BB], ['HBP', s.HBP], ['K', s.K], ['SB', s.SB], ['AVG', f.avg(s.AVG)], ['OBP', f.avg(s.OBP)], ['SLG', f.avg(s.SLG)], ['OPS', f.avg(s.OPS)], ['ISO', f.avg(s.ISO)], ['BABIP', f.avg(s.BABIP)], ['wOBA', f.avg(s.wOBA)], ['OPS+', f.n0(s['OPS+'])], ['RC', s.RC], ['BB/K', s['BB/K']]]), 'full')}
-    ${panel('Plate discipline', `From the pitch-by-pitch ball/strike sequences (${f.pct(pd.coverage, 0)} of his plate appearances had them).`, kv([['P/PA', pd.pitches_per_pa], ['Swing%', f.pct(pd.swing_pct)], ['Whiff%', f.pct(pd.whiff_pct)], ['Contact%', f.pct(pd.contact_pct)], ['1st Swing%', f.pct(pd.first_pitch_swing_pct)], ['Called strike %', f.pct(pd.called_strike_pct), 'CSW%'], ['Foul % of swings', f.pct(pd.foul_pct_of_swings), 'Contact%'], ['2-strike fouls / PA', pd.fouls_per_two_strike_pa, 'P/PA'], ['Full-count PAs', pd.full_count_pa, 'PA'], ['7+ pitch PAs', pd.long_pa_7plus, 'P/PA'], ['K%', f.pct(s['K%'])], ['BB%', f.pct(s['BB%'])]]))}
-    ${panel('Batted balls', `Based on ${sp.bip} balls in play described in play-by-play.`, kv([['GB%', f.pct(sp.gb_pct)], ['LD%', f.pct(sp.ld_pct)], ['FB%', f.pct(sp.fb_pct)], ['PU%', f.pct(sp.pu_pct)], ['Pull%', f.pct(dir.pull_pct)], ['Center%', f.pct(dir.center_pct), 'Pull%'], ['Oppo%', f.pct(dir.oppo_pct)], ['GO/AO', s['GO/AO']]]))}
-    ${panel('How his plate appearances ended', '', resultsBars(h.results, false))}
-  </div>${usmNote(p)}`;
-}
-function usmPitOverview(p) {
-  const P = p.pitching, s = P.season, ps = P.pitch_sequence, sp = P.spray_allowed;
-  return `<div class="grid2">
-    ${panel('Season line', '', kv([['G', s.APP], ['GS', s.GS], ['IP', s.IP], ['W', s.W], ['L', s.L], ['SV', s.SV], ['ERA', f.n2(s.ERA)], ['FIP', f.n2(s.FIP)], ['WHIP', f.n2(s.WHIP)], ['H', s.H], ['ER', s.ER, 'ERA'], ['BB', s.BB], ['K', s.K], ['HR', s.HR], ['HBP', s.HBP], ['K/9', f.n2(s['K/9'])], ['BB/9', f.n2(s['BB/9'])], ['K%', f.pct(s['K%'])], ['BB%', f.pct(s['BB%'])], ['K-BB%', f.pct(s['K-BB%'])], ['OPP AVG', f.avg(s.OPP_AVG)], ['BABIP', f.avg(s.BABIP)], ['P/IP', s['P/IP']], ['IRS%', f.pct(s['IR_scored%'])]]), 'full')}
-    ${panel('Pitch sequence profile', `From scorer ball/strike sequences (${f.pct(ps.coverage, 0)} coverage).`, kv([['Pitches', ps.pitches], ['Strike%', f.pct(ps.strike_pct)], ['F-Strike%', f.pct(ps.first_pitch_strike_pct)], ['Whiff%', f.pct(ps.whiff_pct)], ['CSW%', f.pct(ps.csw_pct)], ['Swing%', f.pct(ps.swing_pct)], ['Putaway%', f.pct(ps.putaway_pct)], ['P/PA', ps.pitches_per_pa], ['3-ball counts', ps.three_ball_pa, 'BB%'], ['Full counts', ps.full_count_pa, 'BB%']]))}
-    ${panel('Batted balls allowed', '', kv([['GB%', f.pct(sp.gb_pct)], ['LD%', f.pct(sp.ld_pct)], ['FB%', f.pct(sp.fb_pct)], ['PU%', f.pct(sp.pu_pct)], ['GO/AO', s['GO/AO']], ['HR/9', f.n2(s['HR/9'])]]))}
-    ${panel('How batters’ plate appearances ended', '', resultsBars(P.results, true))}
-  </div>${usmNote(p)}`;
+function atlPit(p, add) {
+  const P = p.pitching, s = P.season, sc = P.statcast || {};
+  const arsCols = [{ h: 'Pitch', f: (a) => `<span class="sw" style="background:${C.ptColor(a.type)}"></span>${esc(a.name)}` }, { h: 'Usage', f: (a) => f.pct(a.usage) }, { h: 'Velo', k: 'velo' }, { h: 'Max', g: 'Velo', k: 'velo_max' }, { h: 'Spin', k: 'spin' }, { h: 'IVB', k: 'ivb' }, { h: 'HB', k: 'hb' }, { h: 'Ext', k: 'extension' }, { h: 'Whiff%', f: (a) => f.pct(a.whiff_pct) }, { h: 'CSW%', f: (a) => f.pct(a.csw_pct) }, { h: 'Chase%', f: (a) => f.pct(a.chase_pct) }, { h: 'Putaway%', f: (a) => f.pct(a.putaway_pct) }, { h: 'AVG', f: (a) => f.avg(a.ba) }, { h: 'xwOBA', f: (a) => f.avg(a.xwoba) }, { h: 'RV/100', k: 'rv_per_100' }];
+  add('s-summary', 'Summary', 'How he stacks up', 'Percentile ranks from Baseball Savant, plus his season line.', `<div class="viz">
+    ${fig('Percentile ranks', '', percentiles(p, 'pitching'))}
+    ${fig('Season line', '', statRows('p', [['Games', s.gamesPlayed, 'G'], ['Starts', s.gamesStarted, 'GS'], ['Innings', s.inningsPitched, 'IP'], ['Wins', s.wins, 'W'], ['Losses', s.losses, 'L'], ['Saves', s.saves, 'SV'], ['ERA', f.n2(s.era), 'ERA'], ['FIP', f.n2((P.sabermetrics || {}).fip), 'FIP'], ['WHIP', f.n2(s.whip), 'WHIP'], ['Strikeouts', s.strikeOuts, 'K'], ['Walks', s.baseOnBalls, 'BB'], ['Home runs', s.homeRuns, 'HR'], ['K per 9', f.n2(s.strikeoutsPer9Inn), 'K/9'], ['Opponent AVG', f.avg(s.avg), 'OPP AVG'], ['WAR', f.n1((P.sabermetrics || {}).war), 'WAR']]))}</div>`);
+  if (!P.statcast) return;
+  const off = new Set((state.ui['pt-off'] || '').split(',').filter(Boolean));
+  const legend = `<div class="legend">${(P.arsenal || []).map((a) => `<button class="${off.has(a.type) ? 'off' : ''}" data-pt-toggle="${a.type}"><span class="sw" style="background:${C.ptColor(a.type)}"></span>${esc(a.name)}</button>`).join('')}</div>`;
+  const mv = (P.movement || []).filter((m) => !off.has(m[0])).map(([t, hb, ivb, v]) => ({ x: hb, y: ivb, c: C.ptColor(t), o: 0.5, r: 2.6, tip: `<b>${C.PT_NAMES[t] || t}</b> ${v} mph<br>${hb} in sideways, ${ivb} in rise` }));
+  const cents = (P.arsenal || []).filter((a) => !off.has(a.type) && a.hb != null).map((a) => ({ x: a.hb, y: a.ivb, c: C.ptColor(a.type), label: a.type, tip: `<b>${esc(a.name)} average</b><br>${a.velo} mph, ${a.spin} rpm` }));
+  const rel = (P.release || []).filter((m) => !off.has(m[0])).map(([t, x, z]) => ({ x, y: z, c: C.ptColor(t), o: 0.55, r: 2.6, tip: `<b>${C.PT_NAMES[t] || t}</b><br>${x} ft side, ${z} ft high` }));
+  const types = (P.arsenal || []).map((a) => a.type);
+  const vsR = Object.fromEntries((P.arsenal_vs.vs_RHB || []).map((x) => [x.type, x.usage])), vsL = Object.fromEntries((P.arsenal_vs.vs_LHB || []).map((x) => [x.type, x.usage]));
+  add('s-arsenal', 'Arsenal', 'His arsenal', 'Every pitch type: speed, spin, movement and results.', `<div class="viz wide">${fig('Pitch by pitch type', 'Tap a column name for what it means.', table(arsCols, P.arsenal))}</div><div class="viz swipe" style="margin-top:14px">
+    ${fig('Movement', 'Catcher’s view, gravity removed. Up = "rise", sideways = run or sweep. Tap a pitch name to hide or show it.', legend + C.scatter({ pts: mv, centroids: cents, xr: [-25, 25], yr: [-25, 25], xl: 'Horizontal break (in)', yl: 'Induced vertical break (in)', guides: [{ x: 0 }, { y: 0 }], height: 360 }))}
+    ${fig('Mix vs. righties and lefties', 'How often he throws each pitch to each side.', C.bars(types.flatMap((t) => [{ k: `${t} vs RHB`, v: vsR[t] || 0, d: f.pct(vsR[t] || 0), c: C.ptColor(t), sw: C.ptColor(t) }, { k: `${t} vs LHB`, v: vsL[t] || 0, d: f.pct(vsL[t] || 0), c: C.ptColor(t) }]), { max: 1, lw: 96 }))}
+    ${fig('Release point', 'Where the ball leaves his hand. A tight cluster means a repeatable delivery.', legend + C.scatter({ pts: rel, xr: [-4.5, 4.5], yr: [3, 7.5], xl: 'Side (ft)', yl: 'Height (ft)', guides: [{ x: 0 }] }))}</div>`);
+  const lt = ui('loc-type', 'ALL'); const locH = lt === 'ALL' ? P.heat : { ...P.heat, pitches: P.heat_by_type[lt] };
+  const ZP = ZONE_M.filter((z) => ['xwoba', 'ba', 'whiff', 'swing', 'pct'].includes(z[0]));
+  add('s-zone', 'Location', 'Where he throws it', 'Catcher’s view of every pitch, and what hitters did in each zone.', `<div class="viz swipe">
+    ${fig('Pitch locations', 'Pick a pitch type to see how he locates it.', chips('loc-type', [['ALL', 'All'], ...Object.keys(P.heat_by_type || {}).map((t) => [t, t])], lt) + C.heat(locH, { mat: 'pitches', szTop: 3.4, szBot: 1.6, label: 'pitches' }))}
+    ${zoneFig(P.zones, 'zm-p', null, 'Results by zone', 'What hitters did against him in each zone.', ZP)}
+    ${fig('Count by count', 'Opponent wOBA in plate appearances that ended in each count. Blue = he won it.', C.countGrid((b, st) => { const d = P.counts[b + '-' + st]; return d && { n: d.pa_end, v: d.woba, tip: `${d.pa_end} PAs ended here<br>wOBA ${f.avg(d.woba)}, ${d.k} strikeouts` }; }, { fmt: f.avg }))}
+    ${fig('Balls in play against him', `${P.spray_allowed.length} batted balls.`, resLeg() + C.spray(P.spray_allowed))}</div>`);
+  const gl = (P.gamelog || []).filter((g) => g.gt === 'R' && g.sc);
+  const top = (P.arsenal || []).filter((a) => a.usage >= 0.08).slice(0, 4).map((a) => a.type);
+  const RM = { erafip: ['ERA and FIP', [['era', 'ERA'], ['fip', 'FIP']], f.n2, LG.era], kbb: ['K and BB rate', [['k_pct', 'K rate'], ['bb_pct', 'BB rate']], (v) => f.pct(v), null], whiff: ['Whiff and CSW', [['whiff_pct', 'Whiff rate'], ['csw_pct', 'CSW']], (v) => f.pct(v), null], xwoba: ['xwOBA allowed', [['xwoba', 'xwOBA']], f.avg, LG.xwoba] };
+  const rm = ui('roll-p', 'erafip'); const rows = P.rolling.rows;
+  add('s-trend', 'Trends', 'How his season moved', 'Velocity outing by outing, and rolling results.', `<div class="viz wide">
+    ${fig('Velocity by outing', 'Average speed of his main pitches each game.', C.line({ series: top.map((t) => ({ name: C.PT_NAMES[t] || t, color: C.ptColor(t), values: gl.map((g) => g.sc.velo[t] ?? null) })), labels: gl.map((g) => g.date), fmt: (v) => v.toFixed(1), extra: (i) => `<br>vs ${esc(gl[i].opp)}, ${gl[i].inningsPitched} IP, ${gl[i].sc.pitches} pitches` }))}
+    ${fig(`Rolling ${P.rolling.window_games} outings`, `Each point adds up his last ${P.rolling.window_games} appearances.`, chips('roll-p', Object.entries(RM).map(([k, v]) => [k, v[0]]), rm) + C.line({ series: RM[rm][1].map(([k, l], i) => ({ name: l, color: i ? C.series(1) : C.v('--amber'), values: rows.map((r) => r[k]) })), labels: rows.map((r) => r.date), fmt: RM[rm][2], ref: RM[rm][3], refLabel: RM[rm][3] ? 'MLB avg' : '' }))}</div>`);
 }
 const RES_NAMES = { K_S: 'Strikeout swinging', K_L: 'Strikeout looking', K: 'Strikeout', BB: 'Walk', IBB: 'Intentional walk', HBP: 'Hit by pitch', '1B': 'Single', '2B': 'Double', '3B': 'Triple', HR: 'Home run', GO: 'Ground out', GIDP: 'Double play', FO: 'Fly out', LO: 'Line out', PO: 'Pop out', FL: 'Foul out', SF: 'Sacrifice fly', SH: 'Sacrifice bunt', FC: "Fielder's choice", ROE: 'Reached on error', CI: 'Catcher interference' };
 function resultsBars(res, pitcher) {
-  const tot = Object.values(res || {}).reduce((a, b) => a + b, 0) || 1;
-  const good = new Set(['1B', '2B', '3B', 'HR', 'BB', 'IBB', 'HBP', 'ROE']);
-  return C.bars(Object.entries(res || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ k: RES_NAMES[k] || k, v, d: `${v} (${f.pct(v / tot, 0)})`, c: good.has(k) !== pitcher ? 'var(--s1)' : 'var(--text-muted)' })), { lw: 130 }) +
-    `<p class="note">Blue = good for the ${pitcher ? 'pitcher' : 'hitter'}.</p>`;
+  const tot = Object.values(res || {}).reduce((a, b) => a + b, 0) || 1; const good = new Set(['1B', '2B', '3B', 'HR', 'BB', 'IBB', 'HBP', 'ROE']);
+  return C.bars(Object.entries(res || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ k: RES_NAMES[k] || k, v, d: `${v} (${f.pct(v / tot, 0)})`, c: good.has(k) !== pitcher ? 'var(--amber)' : 'var(--ink-3)' })), { lw: 140 }) + `<p class="note">Amber = good for the ${pitcher ? 'pitcher' : 'hitter'}.</p>`;
+}
+const usmNote = (p) => `<p class="note">${(p.notes || []).map(esc).join(' ')}</p>`;
+const pitchMix = (o) => C.bars([['Balls', o.balls, 'var(--ink-3)'], ['Called strikes', o.called_strikes, 'var(--s4)'], ['Swinging strikes', o.swinging_strikes, 'var(--s8)'], ['Fouls', o.fouls, 'var(--s3)'], ['Put in play', o.in_play, 'var(--s1)']].map(([k, v, c]) => ({ k, v, d: `${v} (${f.pct(v / o.pitches, 0)})`, c })), { lw: 130 });
+function usmHit(p, add) {
+  const h = p.hitting, s = h.season, pd = h.plate_discipline, sp = h.spray, d = h.direction || {}, af = pd.after_first_pitch || {};
+  add('s-summary', 'Summary', 'Season line', 'Totals and rates from all 61 box scores.', `<div class="viz">
+    ${fig('Hitting', '', statRows('h', [['Games', s.G, 'G'], ['Plate appearances', s.PA, 'PA'], ['Hits', s.H, 'H'], ['Doubles', s['2B'], '2B'], ['Triples', s['3B'], '3B'], ['Home runs', s.HR, 'HR'], ['Runs batted in', s.RBI, 'RBI'], ['Runs', s.R, 'R'], ['Walks', s.BB, 'BB'], ['Strikeouts', s.K, 'K'], ['Stolen bases', s.SB, 'SB'], ['Batting average', f.avg(s.AVG), 'AVG'], ['On-base %', f.avg(s.OBP), 'OBP'], ['Slugging %', f.avg(s.SLG), 'SLG'], ['OPS', f.avg(s.OPS), 'OPS'], ['OPS+ (team = 100)', f.n0(s['OPS+']), 'OPS+'], ['wOBA', f.avg(s.wOBA), 'wOBA'], ['Isolated power', f.avg(s.ISO), 'ISO']]))}
+    ${fig('How his plate appearances ended', '', resultsBars(h.results, false))}</div>`);
+  add('s-spray', 'Spray', 'Where he hits it', `Built from the play-by-play wording of ${sp.located} balls in play.`, `<div class="viz swipe">
+    ${fig('Spray zones', 'Darker = more balls in play. Tap a zone for hits and extra-base hits.', C.wedgeSpray(sp))}
+    ${fig('Batted-ball mix', '', statRows('h', [['Ground-ball rate', f.pct(sp.gb_pct), 'GB%'], ['Line-drive rate', f.pct(sp.ld_pct), 'LD%'], ['Fly-ball rate', f.pct(sp.fb_pct), 'FB%'], ['Pop-up rate', f.pct(sp.pu_pct), 'PU%'], ['Pull rate', f.pct(d.pull_pct), 'Pull%'], ['Center', f.pct(d.center_pct), 'Pull%'], ['Opposite field', f.pct(d.oppo_pct), 'Oppo%']]))}</div>`);
+  add('s-approach', 'Approach', 'At-bat approach', `From the scorer’s ball-and-strike sequences (${f.pct(pd.coverage, 0)} of his plate appearances).`, `<div class="viz swipe">
+    ${fig('Count by count', 'wOBA in plate appearances that ended in each count.', C.countGrid((b, st) => { const x = h.counts_pa_ended[b + '-' + st]; return x && { n: x.PA, v: x.wOBA, tip: `${x.PA} PA<br>AVG ${f.avg(x.AVG)}, OBP ${f.avg(x.OBP)}, SLG ${f.avg(x.SLG)}` }; }, { fmt: f.avg }))}
+    ${fig('After the first pitch', 'wOBA after getting ahead 1-0, falling behind 0-1, or swinging at pitch one.', C.bars([['first_pitch_in_play', 'First pitch in play'], ['1-0', 'After 1-0'], ['0-1', 'After 0-1']].filter(([k]) => af[k]).map(([k, l], i) => ({ k: l, v: af[k].wOBA, d: f.avg(af[k].wOBA), c: [C.series(0), 'var(--amber)', C.series(1)][i], tip: `<b>${l}</b><br>${af[k].PA} PA, AVG ${f.avg(af[k].AVG)}, OBP ${f.avg(af[k].OBP)}, SLG ${f.avg(af[k].SLG)}` })), { max: 0.7, lw: 140 }))}
+    ${fig('Pitches he saw', `${pd.pitches} pitches tracked.`, pitchMix(pd))}
+    ${fig('Discipline', '', statRows('h', [['Pitches per PA', pd.pitches_per_pa, 'P/PA'], ['Swing rate', f.pct(pd.swing_pct), 'Swing%'], ['Whiff rate', f.pct(pd.whiff_pct), 'Whiff%'], ['Contact rate', f.pct(pd.contact_pct), 'Contact%'], ['First-pitch swing rate', f.pct(pd.first_pitch_swing_pct), '1st Swing%'], ['Strikeout rate', f.pct(s['K%']), 'K%'], ['Walk rate', f.pct(s['BB%']), 'BB%'], ['Full-count PAs', pd.full_count_pa, 'PA'], ['7+ pitch PAs', pd.long_pa_7plus, 'P/PA']]))}</div>`);
+  const roll = h.rolling_10g, cum = h.cumulative; const rm = ui('roll-u', 'ops'); const T = state.index.teams.usm.hitting;
+  const RM = { ops: ['OPS', f.avg, T.OPS], woba: ['wOBA', f.avg, T.wOBA], avg: ['AVG', f.avg, T.AVG], k_pct: ['K rate', (v) => f.pct(v), T['K%']], bb_pct: ['BB rate', (v) => f.pct(v), T['BB%']] };
+  add('s-trend', 'Trends', 'How his season moved', 'Dashed line = Southern Miss team average.', `<div class="viz wide">
+    ${fig('Rolling 10 games', '', chips('roll-u', Object.entries(RM).map(([k, v]) => [k, v[0]]), rm) + C.line({ series: [{ name: RM[rm][0], color: C.v('--amber'), values: roll.map((r) => r[rm]) }], labels: roll.map((r) => r.date), fmt: RM[rm][1], ref: RM[rm][2], refLabel: 'team avg' }))}
+    ${fig('Season to date', 'AVG, OBP and SLG after every game.', C.line({ series: [{ name: 'AVG', color: C.series(0), values: cum.map((r) => r.avg) }, { name: 'OBP', color: C.series(1), values: cum.map((r) => r.obp) }, { name: 'SLG', color: C.series(2), values: cum.map((r) => r.slg) }], labels: cum.map((r) => r.date), fmt: f.avg }))}</div>${usmNote(p)}`);
+}
+function usmPit(p, add) {
+  const P = p.pitching, s = P.season, ps = P.pitch_sequence, af = ps.after_first_pitch || {};
+  add('s-summary', 'Summary', 'Season line', 'Totals and rates from all 61 box scores.', `<div class="viz">
+    ${fig('Pitching', '', statRows('p', [['Games', s.APP, 'G'], ['Starts', s.GS, 'GS'], ['Innings', s.IP, 'IP'], ['Wins', s.W, 'W'], ['Losses', s.L, 'L'], ['Saves', s.SV, 'SV'], ['ERA', f.n2(s.ERA), 'ERA'], ['FIP', f.n2(s.FIP), 'FIP'], ['WHIP', f.n2(s.WHIP), 'WHIP'], ['Strikeouts', s.K, 'K'], ['Walks', s.BB, 'BB'], ['Home runs', s.HR, 'HR'], ['K per 9', f.n2(s['K/9']), 'K/9'], ['BB per 9', f.n2(s['BB/9']), 'BB/9'], ['Strikeout rate', f.pct(s['K%']), 'K%'], ['Walk rate', f.pct(s['BB%']), 'BB%'], ['K% minus BB%', f.pct(s['K-BB%']), 'K-BB%'], ['Opponent AVG', f.avg(s.OPP_AVG), 'OPP AVG']]))}
+    ${fig('How batters’ plate appearances ended', '', resultsBars(P.results, true))}</div>`);
+  add('s-approach', 'Pitching', 'How he attacks hitters', `From the scorer’s ball-and-strike sequences (${f.pct(ps.coverage, 0)} coverage).`, `<div class="viz swipe">
+    ${fig('Count by count', 'Opponent wOBA in plate appearances that ended in each count. Blue = he won it.', C.countGrid((b, st) => { const x = P.counts_pa_ended[b + '-' + st]; return x && { n: x.PA, v: x.wOBA, tip: `${x.PA} PA<br>AVG ${f.avg(x.AVG)}, ${x.K} K, ${x.BB} BB` }; }, { fmt: f.avg }))}
+    ${fig('Winning the first pitch', 'Opponent wOBA after he got ahead 0-1 vs. fell behind 1-0. Lower is better.', C.bars([['0-1', 'After 0-1'], ['1-0', 'After 1-0'], ['first_pitch_in_play', 'First pitch in play']].filter(([k]) => af[k]).map(([k, l], i) => ({ k: l, v: af[k].wOBA, d: f.avg(af[k].wOBA), c: ['var(--amber)', C.series(1), C.series(0)][i], tip: `<b>${l}</b><br>${af[k].PA} PA, AVG ${f.avg(af[k].AVG)}, K rate ${f.pct(af[k]['K%'])}` })), { max: 0.7, lw: 140 }))}
+    ${fig('What his pitches became', `${ps.pitches} pitches tracked.`, pitchMix(ps))}
+    ${fig('Where batters hit it', `${P.spray_allowed.located} balls in play.`, C.wedgeSpray(P.spray_allowed))}</div>`);
+  const rows = P.rolling.rows, gl = P.gamelog; const rm = ui('roll-up', 'erafip');
+  const RM = { erafip: ['ERA and FIP', [['era', 'ERA'], ['fip', 'FIP']], f.n2], kbb: ['K and BB rate', [['k_pct', 'K rate'], ['bb_pct', 'BB rate']], (v) => f.pct(v)], whip: ['WHIP', [['whip', 'WHIP']], f.n2], ppi: ['Pitches per inning', [['pitches_per_ip', 'Pitches/inning']], f.n1] };
+  add('s-trend', 'Trends', 'How his season moved', '', `<div class="viz wide">
+    ${fig(`Rolling ${P.rolling.window_games} outings`, '', chips('roll-up', Object.entries(RM).map(([k, v]) => [k, v[0]]), rm) + C.line({ series: RM[rm][1].map(([k, l], i) => ({ name: l, color: i ? C.series(1) : C.v('--amber'), values: rows.map((r) => r[k]) })), labels: rows.map((r) => r.date), fmt: RM[rm][2] }))}
+    ${fig('Workload', 'Pitches thrown each outing.', C.line({ series: [{ name: 'Pitches', color: C.series(0), values: gl.map((g) => g.pitches) }], labels: gl.map((g) => g.date), fmt: (v) => Math.round(v), extra: (i) => `<br>vs ${esc(gl[i].opp)}, ${gl[i].IP} IP, ${gl[i].K} K, ${gl[i].ER} ER` }))}</div>${usmNote(p)}`);
 }
 
-// ===== CHARTS =====
-function charts(p, side) {
-  if (p.team === 'atl') return side === 'hitting' ? atlHitCharts(p) : atlPitCharts(p);
-  return side === 'hitting' ? usmHitCharts(p) : usmPitCharts(p);
-}
-const ZONE_METRICS_H = [['xwoba', 'xwOBA', 0.315, 0.15, f.avg], ['ba', 'AVG', 0.245, 0.15, f.avg], ['slg', 'SLG', 0.405, 0.3, f.avg], ['swing', 'Swing%', 0.47, 0.35, (v) => f.pct(v, 0)], ['whiff', 'Whiff%', 0.25, 0.25, (v) => f.pct(v, 0)], ['pct', 'Pitches %', 0, 0, (v) => f.pct(v, 0)]];
-function zonePanel(zones, keyName, side, who) {
-  const cur = ui(keyName, 'xwoba'); const m = ZONE_METRICS_H.find((z) => z[0] === cur);
-  const body = chips(keyName, ZONE_METRICS_H.map((z) => [z[0], z[1]]), cur) + C.zoneMap(zones, { key: m[0], mid: m[2], span: m[3], fmt: m[4], seq: m[0] === 'pct', side, minN: m[0] === 'pct' ? 1 : 8 });
-  return panel('Strike-zone hot & cold map', `${who} in each of the 13 Statcast zones. Red = higher than MLB average, blue = lower${cur === 'pct' ? ' (darker = more pitches)' : ''}. The bold box is the strike zone; the 4 outer pieces are just off the plate.`, body);
-}
-const HEAT_H = [['pitches', 'Pitches seen'], ['swings', 'Swings'], ['whiffs', 'Whiff rate'], ['hard_hit', 'Hard hits (95+)'], ['hits', 'Hits']];
-function heatPanel(H, keyName, p, opts, title, hint) {
-  const cur = ui(keyName, opts[0][0]);
-  const rate = cur === 'whiffs' ? 'swings' : null;
-  return panel(title, hint, chips(keyName, opts, cur) + C.heat(H, { mat: cur, rateOf: rate, szTop: p.sz_top || 3.4, szBot: p.sz_bot || 1.6, label: cur.replace('_', ' ') }));
-}
-function atlHitCharts(p) {
-  const h = p.hitting; if (!h.statcast) return '<div class="empty">No Statcast data for this player.</div>';
-  const show = new Set((ui('spray-show', '1B,2B,3B,HR,Out')).split(','));
-  const sprayChips = `<div class="chips">${['1B', '2B', '3B', 'HR', 'Out'].map((k) => `<button class="chip ${show.has(k) ? 'on' : ''}" data-spray="${k}">${k === 'Out' ? 'Outs' : k}</button>`).join('')}</div>`;
-  const resLeg = `<div class="legend">${[['single', 'Single'], ['double', 'Double'], ['triple', 'Triple'], ['home_run', 'Home run'], ['field_out', 'Out']].map(([e, l]) => `<span><span class="sw" style="background:${C.resultColor(e)}"></span>${l}</span>`).join('')}</div>`;
-  const evla = (h.spray || []).map(([x, y, ev, la, e, bt, dt]) => ({ x: la, y: ev, c: C.resultColor(e), o: e && ['single', 'double', 'triple', 'home_run'].includes(e) ? 0.9 : 0.35, tip: `<b>${(e || '').replace(/_/g, ' ')}</b> · ${dt}<br>${ev} mph at ${la}°` }));
-  const rm = ui('roll-h', 'ops');
-  const RM = { ops: ['OPS', f.avg, LG.ops], xwoba: ['xwOBA', f.avg, LG.xwoba], avg: ['AVG', f.avg, LG.avg], k_pct: ['K%', (v) => f.pct(v), LG.k], bb_pct: ['BB%', (v) => f.pct(v), LG.bb], avg_ev: ['Avg exit velo', f.n1, LG.ev], hard_hit_pct: ['Hard Hit%', (v) => f.pct(v), 0.4] };
-  const roll = h.rolling_15g || [];
-  const cum = h.cumulative || [];
-  const vpt = (h.vs_pitch_type || []).filter((x) => x.n >= 40);
-  return `<div class="grid2">
-    ${zonePanel(h.zones, 'zm-h', p.bats, 'How he does on pitches')}
-    ${heatPanel(h.heat, 'hm-h', p, HEAT_H, 'Where pitchers threw to him', 'Every pitch he saw, by location. Switch to see where he swings, misses, and hits the ball hard.')}
-    ${panel('Spray chart', `All ${h.spray.length} balls he put in play (Statcast coordinates). Tap a dot for exit velo, launch angle and distance.`, sprayChips + resLeg + C.spray(h.spray, { show }))}
-    ${panel('Exit velocity vs. launch angle', 'Each dot is a batted ball. The shaded band (8°–32°) is the "sweet spot"; dots above the dashed line were hit 95+ mph.', resLeg + C.scatter({ pts: evla, xr: [-60, 80], yr: [40, 120], xl: 'Launch angle (°)', yl: 'Exit velocity (mph)', bands: [{ x0: 8, x1: 32, label: 'sweet spot' }], guides: [{ y: 95, label: '95 mph' }] }))}
-    ${panel('Rolling 15-game trend', 'Each point = his last 15 games added together. Dashed line = MLB average.', chips('roll-h', Object.entries(RM).map(([k, v]) => [k, v[0]]), rm) + C.line({ series: [{ name: RM[rm][0], color: C.series(0), values: roll.map((r) => r[rm]) }], labels: roll.map((r) => r.date), fmt: RM[rm][1], ref: RM[rm][2], refLabel: 'MLB avg' }), 'full')}
-    ${panel('Season-to-date AVG / OBP / SLG', 'How his slash line built up over the season.', C.line({ series: [{ name: 'AVG', color: C.series(0), values: cum.map((r) => r.avg) }, { name: 'OBP', color: C.series(1), values: cum.map((r) => r.obp) }, { name: 'SLG', color: C.series(2), values: cum.map((r) => r.slg) }], labels: cum.map((r) => r.date), fmt: f.avg }), 'full')}
-    ${panel('Results by pitch type faced', 'xwOBA against each pitch type (min 40 pitches). Longer bar = more damage.', C.bars(vpt.map((x) => ({ k: x.name, v: x.xwoba, d: f.avg(x.xwoba), c: C.ptColor(x.type), sw: C.ptColor(x.type), tip: `<b>${esc(x.name)}</b><br>${x.n} pitches seen (${f.pct(x.usage)})<br>AVG ${f.avg(x.ba)} · SLG ${f.avg(x.slg)} · Whiff% ${f.pct(x.whiff_pct)}<br>Run value ${x.run_value}` })), { max: 0.6, lw: 120 }))}
-    ${panel('Count by count', 'wOBA in plate appearances that ended in each count. Red = he did damage, blue = he struggled.', C.countGrid((b, s) => { const d = h.counts[b + '-' + s]; return d && { n: d.pa_end, v: d.woba, tip: `${d.pa_end} PAs ended here · wOBA ${f.avg(d.woba)}<br>${d.pitches} pitches seen · swing ${f.pct(d.swing)} · whiff ${f.pct(d.whiff)}` }; }, { fmt: f.avg }))}
-  </div>`;
-}
-function atlPitCharts(p) {
-  const P = p.pitching; if (!P.statcast) return '<div class="empty">No Statcast data for this pitcher.</div>';
-  const off = new Set((state.ui['pt-off'] || '').split(',').filter(Boolean));
-  const types = (P.arsenal || []).map((a) => a.type);
-  const legend = `<div class="legend">${(P.arsenal || []).map((a) => `<button class="${off.has(a.type) ? 'off' : ''}" data-pt-toggle="${a.type}"><span class="sw" style="background:${C.ptColor(a.type)}"></span>${esc(a.name)}</button>`).join('')}</div>`;
-  const mv = (P.movement || []).filter((m) => !off.has(m[0])).map(([t, hb, ivb, v]) => ({ x: hb, y: ivb, c: C.ptColor(t), o: 0.5, r: 2.6, tip: `<b>${C.PT_NAMES[t] || t}</b> ${v} mph<br>HB ${hb} in · IVB ${ivb} in` }));
-  const cents = (P.arsenal || []).filter((a) => !off.has(a.type) && a.hb != null).map((a) => ({ x: a.hb, y: a.ivb, c: C.ptColor(a.type), label: a.type, tip: `<b>${esc(a.name)} average</b><br>${a.velo} mph · ${a.spin} rpm<br>HB ${a.hb} in · IVB ${a.ivb} in` }));
-  const rel = (P.release || []).filter((m) => !off.has(m[0])).map(([t, x, z]) => ({ x, y: z, c: C.ptColor(t), o: 0.55, r: 2.6, tip: `<b>${C.PT_NAMES[t] || t}</b><br>release ${x} ft side, ${z} ft high` }));
-  const lt = ui('loc-type', 'ALL');
-  const locOpts = [['ALL', 'All pitches'], ...Object.keys(P.heat_by_type || {}).map((t) => [t, t])];
-  const locH = lt === 'ALL' ? P.heat : { ...P.heat, pitches: P.heat_by_type[lt] };
-  const gl = (P.gamelog || []).filter((g) => g.gt === 'R' && g.sc);
-  const topTypes = (P.arsenal || []).filter((a) => a.usage >= 0.08).slice(0, 4).map((a) => a.type);
-  const rm = ui('roll-p', 'erafip'); const rows = P.rolling.rows;
-  const RM = { erafip: ['ERA & FIP', [['era', 'ERA'], ['fip', 'FIP']], f.n2, LG.era], kbb: ['K% & BB%', [['k_pct', 'K%'], ['bb_pct', 'BB%']], (v) => f.pct(v), null], whiff: ['Whiff% & CSW%', [['whiff_pct', 'Whiff%'], ['csw_pct', 'CSW%']], (v) => f.pct(v), null], xwoba: ['xwOBA allowed', [['xwoba', 'xwOBA']], f.avg, LG.xwoba] };
-  const zm = ui('zm-p', 'xwoba');
-  const ZP = ZONE_METRICS_H.filter((z) => ['xwoba', 'ba', 'whiff', 'swing', 'pct'].includes(z[0]));
-  const m = ZP.find((z) => z[0] === zm) || ZP[0];
-  const arsCols = [{ h: 'Pitch', f: (a) => `<span class="sw" style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${C.ptColor(a.type)};margin-right:6px"></span>${esc(a.name)}` }, { h: 'Usage', f: (a) => f.pct(a.usage) }, { h: '#', g: 'Pitches', k: 'n' }, { h: 'Velo', k: 'velo' }, { h: 'Max', g: 'Velo', k: 'velo_max' }, { h: 'Spin', k: 'spin' }, { h: 'IVB', k: 'ivb' }, { h: 'HB', k: 'hb' }, { h: 'Ext', k: 'extension' }, { h: 'Arm Angle', k: 'arm_angle' }, { h: 'Whiff%', f: (a) => f.pct(a.whiff_pct) }, { h: 'CSW%', f: (a) => f.pct(a.csw_pct) }, { h: 'Chase%', f: (a) => f.pct(a.chase_pct) }, { h: 'Zone%', f: (a) => f.pct(a.zone_pct) }, { h: 'Putaway%', f: (a) => f.pct(a.putaway_pct) }, { h: 'AVG', f: (a) => f.avg(a.ba) }, { h: 'xwOBA', f: (a) => f.avg(a.xwoba) }, { h: 'Hard Hit%', f: (a) => f.pct(a.hard_hit_pct) }, { h: 'RV/100', k: 'rv_per_100' }];
-  const vsR = Object.fromEntries((P.arsenal_vs.vs_RHB || []).map((x) => [x.type, x.usage])), vsL = Object.fromEntries((P.arsenal_vs.vs_LHB || []).map((x) => [x.type, x.usage]));
-  return `<div class="grid2">
-    ${panel('Arsenal', 'Every pitch type he throws. Tap any column name for what it means.', table(arsCols, P.arsenal), 'full')}
-    ${panel('Pitch movement', 'How each pitch moves (catcher’s view, gravity removed). Up = "rise", left/right = run or sweep. Big circles = averages. Tap names to hide/show.', legend + C.scatter({ pts: mv, centroids: cents, xr: [-25, 25], yr: [-25, 25], xl: 'Horizontal break (in)', yl: 'Induced vertical break (in)', guides: [{ x: 0 }, { y: 0 }], height: 360 }))}
-    ${panel('Pitch mix: righties vs. lefties', 'Usage of each pitch against right-handed and left-handed batters.', C.bars(types.flatMap((t) => [{ k: `${t} vs RHB`, v: vsR[t] || 0, d: f.pct(vsR[t] || 0), c: C.ptColor(t), sw: C.ptColor(t) }, { k: `${t} vs LHB`, v: vsL[t] || 0, d: f.pct(vsL[t] || 0), c: C.ptColor(t) }]), { max: 1, lw: 96 }))}
-    ${panel('Where he throws it', 'Pitch locations, catcher’s view. Pick a pitch type to see how he locates it.', chips('loc-type', locOpts, lt) + C.heat(locH, { mat: 'pitches', szTop: 3.4, szBot: 1.6, label: 'pitches' }))}
-    ${panel('Zone map: results allowed', 'What hitters did against him in each zone. Red = higher than MLB average.', chips('zm-p', ZP.map((z) => [z[0], z[1]]), m[0]) + C.zoneMap(P.zones, { key: m[0], mid: m[2], span: m[3], fmt: m[4], seq: m[0] === 'pct', minN: m[0] === 'pct' ? 1 : 8 }))}
-    ${panel('Release point', 'Where the ball leaves his hand (catcher’s view, feet). Tight clusters = consistent delivery.', legend + C.scatter({ pts: rel, xr: [-4.5, 4.5], yr: [3, 7.5], xl: 'Side (ft)', yl: 'Height (ft)', guides: [{ x: 0 }] }))}
-    ${panel('Velocity by game', 'Average speed of his main pitches each outing.', C.line({ series: topTypes.map((t) => ({ name: C.PT_NAMES[t] || t, color: C.ptColor(t), values: gl.map((g) => g.sc.velo[t] ?? null) })), labels: gl.map((g) => g.date), fmt: (v) => v.toFixed(1) + '', extra: (i) => `<br>vs ${esc(gl[i].opp)} · ${gl[i].inningsPitched} IP · ${gl[i].sc.pitches} pitches` }), 'full')}
-    ${panel(`Rolling ${P.rolling.window_games}-game trend`, `Each point = his last ${P.rolling.window_games} appearances combined.`, chips('roll-p', Object.entries(RM).map(([k, v]) => [k, v[0]]), rm) + C.line({ series: RM[rm][1].map(([k, l], i) => ({ name: l, color: C.series(i), values: rows.map((r) => r[k]) })), labels: rows.map((r) => r.date), fmt: RM[rm][2], ref: RM[rm][3], refLabel: RM[rm][3] ? 'MLB avg' : '' }), 'full')}
-    ${panel('Balls in play against him', `${P.spray_allowed.length} batted balls.`, C.spray(P.spray_allowed))}
-    ${panel('Count by count', 'wOBA allowed in plate appearances that ended in each count. Blue = he won those counts.', C.countGrid((b, s) => { const d = P.counts[b + '-' + s]; return d && { n: d.pa_end, v: d.woba, tip: `${d.pa_end} PAs ended here · wOBA ${f.avg(d.woba)} · ${d.k} K` }; }, { fmt: f.avg }))}
-  </div>`;
-}
-function usmHitCharts(p) {
-  const h = p.hitting, pd = h.plate_discipline;
-  const af = pd.after_first_pitch || {};
-  const roll = h.rolling_10g, cum = h.cumulative;
-  const rm = ui('roll-u', 'ops');
-  const RM = { ops: ['OPS', f.avg], woba: ['wOBA', f.avg], avg: ['AVG', f.avg], k_pct: ['K%', (v) => f.pct(v)], bb_pct: ['BB%', (v) => f.pct(v)] };
-  const sp = h.splits;
-  return `<div class="grid2">
-    ${panel('Spray zones', `Where his ${h.spray.located} located balls in play went, from the play-by-play ("singled to left center", "grounded out to ss"). Darker = more balls; number = count. Tap a zone for hits.`, C.wedgeSpray(h.spray))}
-    ${panel('After the first pitch', 'How he hit after falling behind 0-1 vs. getting ahead 1-0, and when he put the first pitch in play.', C.bars([['first_pitch_in_play', 'Swung 1st pitch, in play'], ['1-0', 'After 1-0 (ahead)'], ['0-1', 'After 0-1 (behind)']].filter(([k]) => af[k]).map(([k, l], i) => ({ k: l, v: af[k].wOBA, d: f.avg(af[k].wOBA), c: C.series(i), tip: `<b>${l}</b><br>${af[k].PA} PA · ${af[k].AVG != null ? 'AVG ' + f.avg(af[k].AVG) : ''} · OBP ${f.avg(af[k].OBP)} · SLG ${f.avg(af[k].SLG)}<br>K% ${f.pct(af[k]['K%'])}` })), { max: 0.7, lw: 150 }) + '<p class="note">Bars show wOBA. Tap for AVG/OBP/SLG.</p>')}
-    ${panel('Count by count', 'wOBA in plate appearances that ended in each count (the count before the last pitch).', C.countGrid((b, s) => { const d = h.counts_pa_ended[b + '-' + s]; return d && { n: d.PA, v: d.wOBA, tip: `${d.PA} PA · AVG ${f.avg(d.AVG)} · OBP ${f.avg(d.OBP)} · SLG ${f.avg(d.SLG)}` }; }, { fmt: f.avg }))}
-    ${panel('Pitches he saw', `${pd.pitches} pitches across ${pd.pa_with_pitch_data} plate appearances.`, C.bars([['Balls', pd.balls, 'var(--text-muted)'], ['Called strikes', pd.called_strikes, 'var(--s4)'], ['Swinging strikes', pd.swinging_strikes, 'var(--s8)'], ['Fouls', pd.fouls, 'var(--s3)'], ['Put in play', pd.in_play, 'var(--s1)']].map(([k, v, c]) => ({ k, v, d: `${v} (${f.pct(v / pd.pitches, 0)})`, c })), { lw: 120 }))}
-    ${panel('Rolling 10-game trend', 'Each point = his last 10 games combined.', chips('roll-u', Object.entries(RM).map(([k, v]) => [k, v[0]]), rm) + C.line({ series: [{ name: RM[rm][0], color: C.series(0), values: roll.map((r) => r[rm]) }], labels: roll.map((r) => r.date), fmt: RM[rm][1], ref: ['ops', 'woba', 'avg'].includes(rm) ? { ops: state.index.teams.usm.hitting.OPS, woba: state.index.teams.usm.hitting.wOBA, avg: state.index.teams.usm.hitting.AVG }[rm] : null, refLabel: 'team avg' }), 'full')}
-    ${panel('Season-to-date AVG / OBP / SLG', '', C.line({ series: [{ name: 'AVG', color: C.series(0), values: cum.map((r) => r.avg) }, { name: 'OBP', color: C.series(1), values: cum.map((r) => r.obp) }, { name: 'SLG', color: C.series(2), values: cum.map((r) => r.slg) }], labels: cum.map((r) => r.date), fmt: f.avg }), 'full')}
-    ${panel('vs. right-handed and left-handed pitchers', 'Built from play-by-play, using the opposing pitcher’s throwing hand.', C.bars([['vs_RHP', 'vs RHP'], ['vs_LHP', 'vs LHP']].flatMap(([k, l], i) => [{ k: l + ' OPS', v: (sp[k].OBP || 0) + (sp[k].SLG || 0), d: f.avg((sp[k].OBP || 0) + (sp[k].SLG || 0)), c: C.series(i), tip: `<b>${l}</b><br>${sp[k].PA} PA · AVG ${f.avg(sp[k].AVG)} · OBP ${f.avg(sp[k].OBP)} · SLG ${f.avg(sp[k].SLG)}<br>K% ${f.pct(sp[k]['K%'])} · BB% ${f.pct(sp[k]['BB%'])}` }]), { max: 1.4, lw: 100 }))}
-    ${panel('Batted-ball mix', '', C.bars([['GB%', 'Ground balls'], ['ld_pct', 'Line drives'], ['fb_pct', 'Fly balls'], ['pu_pct', 'Pop-ups']].map(([k, l], i) => { const v = { 'GB%': h.spray.gb_pct }[k] ?? h.spray[k]; return { k: l, v, d: f.pct(v), c: C.series(i) }; }), { max: 1 }))}
-  </div>${usmNote(p)}`;
-}
-function usmPitCharts(p) {
-  const P = p.pitching, ps = P.pitch_sequence, af = ps.after_first_pitch || {};
-  const rows = P.rolling.rows, gl = P.gamelog;
-  const rm = ui('roll-up', 'erafip');
-  const RM = { erafip: ['ERA & FIP', [['era', 'ERA'], ['fip', 'FIP']], f.n2], kbb: ['K% & BB%', [['k_pct', 'K%'], ['bb_pct', 'BB%']], (v) => f.pct(v)], whip: ['WHIP', [['whip', 'WHIP']], f.n2], ppi: ['Pitches / inning', [['pitches_per_ip', 'P/IP']], f.n1] };
-  return `<div class="grid2">
-    ${panel('Where batters hit it', `Spray zones of ${P.spray_allowed.located} balls in play against him (from play-by-play).`, C.wedgeSpray(P.spray_allowed))}
-    ${panel('Winning the first pitch', 'How batters did after he got ahead 0-1 vs. fell behind 1-0.', C.bars([['0-1', 'After 0-1 (ahead)'], ['1-0', 'After 1-0 (behind)'], ['first_pitch_in_play', '1st pitch put in play']].filter(([k]) => af[k]).map(([k, l], i) => ({ k: l, v: af[k].wOBA, d: f.avg(af[k].wOBA), c: C.series(i), tip: `<b>${l}</b><br>${af[k].PA} PA · AVG ${f.avg(af[k].AVG)} · K% ${f.pct(af[k]['K%'])} · BB% ${f.pct(af[k]['BB%'])}` })), { max: 0.7, lw: 150 }) + '<p class="note">Bars = opponents’ wOBA (lower is better for him).</p>')}
-    ${panel('Count by count', 'Opponent wOBA in plate appearances that ended in each count. Blue = he won those.', C.countGrid((b, s) => { const d = P.counts_pa_ended[b + '-' + s]; return d && { n: d.PA, v: d.wOBA, tip: `${d.PA} PA · AVG ${f.avg(d.AVG)} · ${d.K} K · ${d.BB} BB` }; }, { fmt: f.avg }))}
-    ${panel('What his pitches turned into', `${ps.pitches} pitches tracked.`, C.bars([['Balls', ps.balls, 'var(--text-muted)'], ['Called strikes', ps.called_strikes, 'var(--s4)'], ['Swinging strikes', ps.swinging_strikes, 'var(--s8)'], ['Fouls', ps.fouls, 'var(--s3)'], ['Put in play', ps.in_play, 'var(--s1)']].map(([k, v, c]) => ({ k, v, d: `${v} (${f.pct(v / ps.pitches, 0)})`, c })), { lw: 120 }))}
-    ${panel(`Rolling ${P.rolling.window_games}-game trend`, '', chips('roll-up', Object.entries(RM).map(([k, v]) => [k, v[0]]), rm) + C.line({ series: RM[rm][1].map(([k, l], i) => ({ name: l, color: C.series(i), values: rows.map((r) => r[k]) })), labels: rows.map((r) => r.date), fmt: RM[rm][2] }), 'full')}
-    ${panel('Workload by outing', 'Pitches thrown each appearance.', C.line({ series: [{ name: 'Pitches', color: C.series(0), values: gl.map((g) => g.pitches) }], labels: gl.map((g) => g.date), fmt: (v) => Math.round(v), extra: (i) => `<br>vs ${esc(gl[i].opp)} · ${gl[i].IP} IP · ${gl[i].K} K · ${gl[i].ER} ER` }), 'full')}
-    ${panel('vs. right-handed and left-handed batters', '', C.bars([['vs_RHB', 'vs RHB'], ['vs_LHB', 'vs LHB']].map(([k, l], i) => { const s = P.splits[k]; return { k: l + ' OPS', v: (s.OBP || 0) + (s.SLG || 0), d: f.avg((s.OBP || 0) + (s.SLG || 0)), c: C.series(i), tip: `<b>${l}</b><br>${s.PA} PA · AVG ${f.avg(s.AVG)} · K% ${f.pct(s['K%'])} · BB% ${f.pct(s['BB%'])}` }; }), { max: 1.2, lw: 100 }))}
-  </div>${usmNote(p)}`;
-}
-
-// ===== SPLITS =====
+// ===== splits / game log / all stats =====
 function splits(p, side) {
   if (p.team === 'atl') {
-    const B = side === 'hitting' ? p.hitting : p.pitching; const S = B.splits || {};
-    const order = ['vl', 'vr', 'h', 'a', 'd', 'n', 'risp', 'ron', 'r0', 'lc', 'e'];
-    const rows = order.filter((k) => S[k]).map((k) => ({ split: S[k].label, ...S[k] }));
-    const cols = side === 'hitting'
-      ? [{ h: 'Split', k: 'split' }, { h: 'PA', k: 'plateAppearances' }, { h: 'AVG', f: (r) => f.avg(r.avg) }, { h: 'OBP', f: (r) => f.avg(r.obp) }, { h: 'SLG', f: (r) => f.avg(r.slg) }, { h: 'OPS', f: (r) => f.avg(r.ops) }, { h: 'HR', k: 'homeRuns' }, { h: 'RBI', k: 'rbi' }, { h: 'BB', k: 'baseOnBalls' }, { h: 'K', k: 'strikeOuts' }, { h: 'BABIP', f: (r) => f.avg(r.babip) }]
-      : [{ h: 'Split', k: 'split' }, { h: 'BF', k: 'battersFaced' }, { h: 'IP', k: 'inningsPitched' }, { h: 'ERA', f: (r) => f.n2(r.era) }, { h: 'OPP AVG', f: (r) => f.avg(r.avg) }, { h: 'OBP', f: (r) => f.avg(r.obp) }, { h: 'SLG', f: (r) => f.avg(r.slg) }, { h: 'K', k: 'strikeOuts' }, { h: 'BB', k: 'baseOnBalls' }, { h: 'HR', k: 'homeRuns' }, { h: 'WHIP', f: (r) => f.n2(r.whip) }];
+    const B = side === 'h' ? p.hitting : p.pitching; const S = B.splits || {};
+    const rows = ['vl', 'vr', 'h', 'a', 'd', 'n', 'risp', 'ron', 'r0', 'lc', 'e'].filter((k) => S[k]).map((k) => ({ split: S[k].label, ...S[k] }));
+    const cols = side === 'h'
+      ? [{ h: 'Split', k: 'split' }, { h: 'PA', k: 'plateAppearances' }, { h: 'AVG', f: (r) => f.avg(r.avg) }, { h: 'OBP', f: (r) => f.avg(r.obp) }, { h: 'SLG', f: (r) => f.avg(r.slg) }, { h: 'OPS', f: (r) => f.avg(r.ops) }, { h: 'HR', k: 'homeRuns' }, { h: 'RBI', k: 'rbi' }, { h: 'BB', k: 'baseOnBalls' }, { h: 'K', k: 'strikeOuts' }]
+      : [{ h: 'Split', k: 'split' }, { h: 'BF', k: 'battersFaced' }, { h: 'IP', k: 'inningsPitched' }, { h: 'ERA', f: (r) => f.n2(r.era) }, { h: 'OPP AVG', f: (r) => f.avg(r.avg) }, { h: 'OBP', f: (r) => f.avg(r.obp) }, { h: 'SLG', f: (r) => f.avg(r.slg) }, { h: 'K', k: 'strikeOuts' }, { h: 'BB', k: 'baseOnBalls' }, { h: 'HR', k: 'homeRuns' }];
     const mcols = [{ h: 'Month', f: (r) => new Date(2026, (r.month || 1) - 1, 1).toLocaleString('en-US', { month: 'long' }) }, ...cols.slice(1)];
-    const vs = B.statcast_vs || {};
-    const vsRows = Object.entries(vs).map(([k, v]) => ({ split: k.replace('_', ' '), ...v }));
-    const vsCols = [{ h: 'Split', k: 'split' }, { h: 'Pitches', k: 'pitches' }, { h: 'PA', k: 'pa' }, { h: 'xwOBA', f: (r) => f.avg(r.xwoba) }, { h: 'wOBA', f: (r) => f.avg(r.woba) }, { h: 'Whiff%', f: (r) => f.pct(r.whiff_pct) }, { h: 'Chase%', f: (r) => f.pct(r.chase_pct) }, { h: 'K%', f: (r) => f.pct(r.k_pct) }, { h: 'BB%', f: (r) => f.pct(r.bb_pct) }, { h: 'avg EV', k: 'avg_ev' }, { h: 'Barrel%', f: (r) => f.pct(r.barrel_pct) }];
-    return `<div class="grid2">${panel('Situational splits', 'vs. LHP/RHP, home/away, day/night, runners on, and more (MLB Stats API).', table(cols, rows), 'full')}
-      ${panel('By month', '', table(mcols, B.months || []), 'full')}
-      ${panel('Statcast by handedness', '', table(vsCols, vsRows), 'full')}
-      ${B.postseason ? panel('2026 Postseason', '', kv(Object.entries(B.postseason).filter(([k, v]) => ['gamesPlayed', 'plateAppearances', 'avg', 'obp', 'slg', 'ops', 'homeRuns', 'rbi', 'inningsPitched', 'era', 'strikeOuts', 'whip'].includes(k) && v != null).map(([k, v]) => [k.replace(/([A-Z])/g, ' $1'), typeof v === 'number' && v < 2 && !Number.isInteger(v) ? f.avg(v) : v])), 'full') : ''}</div>`;
+    return `<div class="viz wide">${fig('Situations', '', table(cols, rows))}${fig('By month', '', table(mcols, B.months || []))}</div>`;
   }
-  if (side === 'hitting') {
+  const mo = (m) => new Date(2026, +m - 1, 1).toLocaleString('en-US', { month: 'long' });
+  if (side === 'h') {
     const S = p.hitting.splits;
-    const rows = [['vs RHP', S.vs_RHP], ['vs LHP', S.vs_LHP], ['Home', S.home], ['Away', S.away], ['Neutral site', S.neutral], ['Conference', S.conference], ['Non-conference', S.non_conference],
-      ...Object.entries(S.by_inning_group).map(([k, v]) => ['Innings ' + k, v]), ...Object.entries(S.by_month).map(([m, v]) => [new Date(2026, +m - 1, 1).toLocaleString('en-US', { month: 'long' }), v]), ...Object.entries(S.by_lineup_spot).map(([k, v]) => ['Batting ' + k + (k === '1' ? 'st' : k === '2' ? 'nd' : k === '3' ? 'rd' : 'th'), v])]
-      .filter(([, v]) => v && v.PA).map(([split, v]) => ({ split, ...v }));
-    const cols = [{ h: 'Split', k: 'split' }, { h: 'PA', k: 'PA' }, { h: 'AB', k: 'AB' }, { h: 'H', k: 'H' }, { h: 'HR', k: 'HR' }, { h: 'BB', k: 'BB' }, { h: 'K', k: 'K' }, { h: 'AVG', f: (r) => f.avg(r.AVG) }, { h: 'OBP', f: (r) => f.avg(r.OBP) }, { h: 'SLG', f: (r) => f.avg(r.SLG) }, { h: 'wOBA', f: (r) => f.avg(r.wOBA) }, { h: 'K%', f: (r) => f.pct(r['K%']) }, { h: 'BB%', f: (r) => f.pct(r['BB%']) }];
-    return panel('Splits', 'Handedness and inning splits come from play-by-play; the rest from box scores.', table(cols, rows), 'full') + usmNote(p);
+    const rows = [['vs. right-handed pitchers', S.vs_RHP], ['vs. left-handed pitchers', S.vs_LHP], ['Home', S.home], ['Away', S.away], ['Neutral site', S.neutral], ['Conference', S.conference], ['Non-conference', S.non_conference],
+      ...Object.entries(S.by_inning_group).map(([k, v]) => ['Innings ' + k, v]), ...Object.entries(S.by_month).map(([m, v]) => [mo(m), v]), ...Object.entries(S.by_lineup_spot).map(([k, v]) => [`Batting ${ord(+k)}`, v])].filter(([, v]) => v && v.PA).map(([split, v]) => ({ split, ...v }));
+    return `<div class="viz wide">${fig('Splits', '', table([{ h: 'Split', k: 'split' }, { h: 'PA', k: 'PA' }, { h: 'H', k: 'H' }, { h: 'HR', k: 'HR' }, { h: 'BB', k: 'BB' }, { h: 'K', k: 'K' }, { h: 'AVG', f: (r) => f.avg(r.AVG) }, { h: 'OBP', f: (r) => f.avg(r.OBP) }, { h: 'SLG', f: (r) => f.avg(r.SLG) }, { h: 'wOBA', f: (r) => f.avg(r.wOBA) }, { h: 'K%', f: (r) => f.pct(r['K%']) }, { h: 'BB%', f: (r) => f.pct(r['BB%']) }], rows))}</div>`;
   }
   const S = p.pitching.splits;
-  const prow = [['As starter', S.as_starter], ['As reliever', S.as_reliever], ['Home', S.home], ['Away', S.away], ['Conference', S.conference], ['Non-conference', S.non_conference], ...Object.entries(S.by_month).map(([m, v]) => [new Date(2026, +m - 1, 1).toLocaleString('en-US', { month: 'long' }), v])].filter(([, v]) => v && v.APP).map(([split, v]) => ({ split, ...v }));
-  const pcols = [{ h: 'Split', k: 'split' }, { h: 'G', k: 'APP' }, { h: 'IP', k: 'IP' }, { h: 'ERA', f: (r) => f.n2(r.ERA) }, { h: 'WHIP', f: (r) => f.n2(r.WHIP) }, { h: 'K', k: 'K' }, { h: 'BB', k: 'BB' }, { h: 'HR', k: 'HR' }, { h: 'K%', f: (r) => f.pct(r['K%']) }, { h: 'BB%', f: (r) => f.pct(r['BB%']) }, { h: 'OPP AVG', f: (r) => f.avg(r.OPP_AVG) }, { h: 'FIP', f: (r) => f.n2(r.FIP) }];
-  const hrow = [['vs RHB', S.vs_RHB], ['vs LHB', S.vs_LHB], ...Object.entries(S.by_inning_group).map(([k, v]) => ['Innings ' + k, v])].filter(([, v]) => v && v.PA).map(([split, v]) => ({ split, ...v }));
-  const hcols = [{ h: 'Split', k: 'split' }, { h: 'PA', g: 'BF', k: 'PA' }, { h: 'AVG', f: (r) => f.avg(r.AVG) }, { h: 'OBP', f: (r) => f.avg(r.OBP) }, { h: 'SLG', f: (r) => f.avg(r.SLG) }, { h: 'wOBA', f: (r) => f.avg(r.wOBA) }, { h: 'K%', f: (r) => f.pct(r['K%']) }, { h: 'BB%', f: (r) => f.pct(r['BB%']) }, { h: 'HR', k: 'HR' }];
-  return `<div class="grid2">${panel('Box-score splits', '', table(pcols, prow), 'full')}${panel('Opponent splits (play-by-play)', '', table(hcols, hrow), 'full')}</div>` + usmNote(p);
+  const prow = [['As a starter', S.as_starter], ['As a reliever', S.as_reliever], ['Home', S.home], ['Away', S.away], ['Conference', S.conference], ['Non-conference', S.non_conference], ...Object.entries(S.by_month).map(([m, v]) => [mo(m), v])].filter(([, v]) => v && v.APP).map(([split, v]) => ({ split, ...v }));
+  const hrow = [['vs. right-handed batters', S.vs_RHB], ['vs. left-handed batters', S.vs_LHB], ...Object.entries(S.by_inning_group).map(([k, v]) => ['Innings ' + k, v])].filter(([, v]) => v && v.PA).map(([split, v]) => ({ split, ...v }));
+  return `<div class="viz wide">${fig('Box-score splits', '', table([{ h: 'Split', k: 'split' }, { h: 'G', k: 'APP' }, { h: 'IP', k: 'IP' }, { h: 'ERA', f: (r) => f.n2(r.ERA) }, { h: 'WHIP', f: (r) => f.n2(r.WHIP) }, { h: 'K', k: 'K' }, { h: 'BB', k: 'BB' }, { h: 'K%', f: (r) => f.pct(r['K%']) }, { h: 'OPP AVG', f: (r) => f.avg(r.OPP_AVG) }, { h: 'FIP', f: (r) => f.n2(r.FIP) }], prow))}
+    ${fig('Opponents (play-by-play)', '', table([{ h: 'Split', k: 'split' }, { h: 'PA', g: 'BF', k: 'PA' }, { h: 'AVG', f: (r) => f.avg(r.AVG) }, { h: 'OBP', f: (r) => f.avg(r.OBP) }, { h: 'SLG', f: (r) => f.avg(r.SLG) }, { h: 'wOBA', f: (r) => f.avg(r.wOBA) }, { h: 'K%', f: (r) => f.pct(r['K%']) }, { h: 'BB%', f: (r) => f.pct(r['BB%']) }], hrow))}</div>`;
 }
-
-// ===== GAME LOG =====
+const opp = (r) => (r.home && !r.neutral ? 'vs ' : r.neutral ? 'vs ' : '@ ') + esc(r.opp);
 function gamelog(p, side) {
   if (p.team === 'atl') {
-    if (side === 'hitting') {
-      const rows = [...p.hitting.gamelog].reverse();
-      return panel('Game log', 'Every game, newest first. "P" = postseason. xwOBA and max EV come from Statcast for that game.', table([
-        { h: 'Date', f: (r) => r.date.slice(5) + (r.gt === 'P' ? ' <span class="badge">P</span>' : '') }, { h: 'Opp', f: (r) => (r.home ? 'vs ' : '@ ') + esc((r.opp || '').split(' ').slice(-1)[0]) }, { h: 'W/L', f: (r) => (r.win ? 'W' : 'L'), cls: (r) => (r.win ? 'w' : 'l') },
-        { h: 'PA', k: 'plateAppearances' }, { h: 'AB', k: 'atBats' }, { h: 'H', k: 'hits' }, { h: '2B', k: 'doubles' }, { h: '3B', k: 'triples' }, { h: 'HR', k: 'homeRuns' }, { h: 'R', k: 'runs' }, { h: 'RBI', k: 'rbi' }, { h: 'BB', k: 'baseOnBalls' }, { h: 'K', k: 'strikeOuts' }, { h: 'SB', k: 'stolenBases' },
-        { h: 'xwOBA', f: (r) => (r.sc && r.sc.woba_den ? f.avg(r.sc.xwoba_num / r.sc.woba_den) : '—') }, { h: 'max EV', f: (r) => (r.sc ? r.sc.max_ev ?? '—' : '—') }, { h: 'Pitches', f: (r) => r.numberOfPitches }], rows), { maxH: 640 }, 'full');
-    }
-    const rows = [...p.pitching.gamelog].reverse();
-    return panel('Game log', 'Every outing, newest first. Velo = average 4-seam (or sinker) speed that day.', table([
-      { h: 'Date', f: (r) => r.date.slice(5) + (r.gt === 'P' ? ' <span class="badge">P</span>' : '') }, { h: 'Opp', f: (r) => (r.home ? 'vs ' : '@ ') + esc((r.opp || '').split(' ').slice(-1)[0]) }, { h: 'Dec', f: (r) => (r.wins ? 'W' : r.losses ? 'L' : r.saves ? 'SV' : r.holds ? 'HLD' : ''), cls: (r) => (r.wins ? 'w' : r.losses ? 'l' : '') },
-      { h: 'IP', k: 'inningsPitched' }, { h: 'H', k: 'hits' }, { h: 'R', k: 'runs' }, { h: 'ER', g: 'ERA', k: 'earnedRuns' }, { h: 'BB', k: 'baseOnBalls' }, { h: 'K', k: 'strikeOuts' }, { h: 'HR', k: 'homeRuns' }, { h: 'Pitches', k: 'numberOfPitches' },
-      { h: 'Whiffs', g: 'Whiff%', f: (r) => (r.sc ? r.sc.whiffs : '—') }, { h: 'CSW%', f: (r) => (r.sc ? f.pct((r.sc.whiffs + r.sc.called) / r.sc.pitches, 0) : '—') }, { h: 'Velo', f: (r) => (r.sc && r.sc.velo ? r.sc.velo.FF ?? r.sc.velo.SI ?? '—' : '—') }, { h: 'Game ERA', g: 'ERA', f: (r) => f.n2(r.era) }], rows), { maxH: 640 }, 'full');
+    if (side === 'h') return fig('Game by game', 'Postseason games are marked P. xwOBA and max exit velo are from Statcast.', table([
+      { h: 'Date', f: (r) => r.date.slice(5) + (r.gt === 'P' ? ' P' : '') }, { h: 'Opponent', f: opp }, { h: 'Result', f: (r) => (r.win ? 'W' : 'L'), cls: (r) => (r.win ? 'w' : 'l') },
+      { h: 'AB', k: 'atBats' }, { h: 'H', k: 'hits' }, { h: '2B', k: 'doubles' }, { h: 'HR', k: 'homeRuns' }, { h: 'R', k: 'runs' }, { h: 'RBI', k: 'rbi' }, { h: 'BB', k: 'baseOnBalls' }, { h: 'K', k: 'strikeOuts' }, { h: 'SB', k: 'stolenBases' },
+      { h: 'xwOBA', f: (r) => (r.sc && r.sc.woba_den ? f.avg(r.sc.xwoba_num / r.sc.woba_den) : '—') }, { h: 'max EV', f: (r) => (r.sc ? r.sc.max_ev ?? '—' : '—') }], [...p.hitting.gamelog].reverse(), { maxH: 620 }));
+    return fig('Outing by outing', 'Velo is average 4-seam (or sinker) speed that day.', table([
+      { h: 'Date', f: (r) => r.date.slice(5) + (r.gt === 'P' ? ' P' : '') }, { h: 'Opponent', f: opp }, { h: 'Dec', f: (r) => (r.wins ? 'W' : r.losses ? 'L' : r.saves ? 'SV' : r.holds ? 'HLD' : ''), cls: (r) => (r.wins ? 'w' : r.losses ? 'l' : '') },
+      { h: 'IP', k: 'inningsPitched' }, { h: 'H', k: 'hits' }, { h: 'ER', g: 'ERA', k: 'earnedRuns' }, { h: 'BB', k: 'baseOnBalls' }, { h: 'K', k: 'strikeOuts' }, { h: 'HR', k: 'homeRuns' }, { h: 'Pitches', k: 'numberOfPitches' },
+      { h: 'CSW%', f: (r) => (r.sc ? f.pct((r.sc.whiffs + r.sc.called) / r.sc.pitches, 0) : '—') }, { h: 'Velo', f: (r) => (r.sc && r.sc.velo ? r.sc.velo.FF ?? r.sc.velo.SI ?? '—' : '—') }], [...p.pitching.gamelog].reverse(), { maxH: 620 }));
   }
-  if (side === 'hitting') {
-    const cum = Object.fromEntries(p.hitting.cumulative.map((c, i) => [i, c]));
-    const rows = p.hitting.gamelog.map((g, i) => ({ ...g, cavg: cum[i] && cum[i].avg, cops: cum[i] && cum[i].ops })).reverse();
-    return panel('Game log', 'Newest first. AVG and OPS are season-to-date after that game.', table([
-      { h: 'Date', f: (r) => r.date.slice(5) }, { h: 'Opp', f: (r) => (r.neutral ? 'vs ' : r.home ? 'vs ' : '@ ') + esc(r.opp) + (r.conf ? ' *' : '') }, { h: 'W/L', f: (r) => r.result + ' ' + r.score, cls: (r) => (r.result === 'W' ? 'w' : 'l') },
-      { h: 'Spot', g: 'G', k: 'spot' }, { h: 'Pos', g: 'G', k: 'pos' }, { h: 'AB', k: 'AB' }, { h: 'R', k: 'R' }, { h: 'H', k: 'H' }, { h: '2B', k: '2B' }, { h: '3B', k: '3B' }, { h: 'HR', k: 'HR' }, { h: 'RBI', k: 'RBI' }, { h: 'BB', k: 'BB' }, { h: 'K', k: 'K' }, { h: 'SB', k: 'SB' }, { h: 'AVG', f: (r) => f.avg(r.cavg) }, { h: 'OPS', f: (r) => f.avg(r.cops) }], rows), { maxH: 640 }, 'full') + '<p class="note">* = conference game</p>';
+  if (side === 'h') {
+    const cum = p.hitting.cumulative; const rows = p.hitting.gamelog.map((g, i) => ({ ...g, cavg: cum[i] && cum[i].avg, cops: cum[i] && cum[i].ops })).reverse();
+    return fig('Game by game', 'AVG and OPS are season-to-date after that game. Conference games are marked *.', table([
+      { h: 'Date', f: (r) => r.date.slice(5) }, { h: 'Opponent', f: (r) => opp(r) + (r.conf ? ' *' : '') }, { h: 'Result', f: (r) => r.result + ' ' + r.score, cls: (r) => (r.result === 'W' ? 'w' : 'l') },
+      { h: 'Spot', g: 'G', k: 'spot' }, { h: 'AB', k: 'AB' }, { h: 'R', k: 'R' }, { h: 'H', k: 'H' }, { h: '2B', k: '2B' }, { h: 'HR', k: 'HR' }, { h: 'RBI', k: 'RBI' }, { h: 'BB', k: 'BB' }, { h: 'K', k: 'K' }, { h: 'AVG', f: (r) => f.avg(r.cavg) }, { h: 'OPS', f: (r) => f.avg(r.cops) }], rows, { maxH: 620 }));
   }
-  const rows = [...p.pitching.gamelog].reverse();
-  return panel('Game log', 'Newest first.', table([
-    { h: 'Date', f: (r) => r.date.slice(5) }, { h: 'Opp', f: (r) => (r.home ? 'vs ' : '@ ') + esc(r.opp) + (r.conf ? ' *' : '') }, { h: 'Team', g: 'W', f: (r) => r.result + ' ' + r.score, cls: (r) => (r.result === 'W' ? 'w' : 'l') }, { h: 'Dec', g: 'W', k: 'dec' }, { h: 'GS', f: (r) => (r.start ? '✓' : '') },
-    { h: 'IP', k: 'IP' }, { h: 'H', k: 'H' }, { h: 'R', k: 'R' }, { h: 'ER', g: 'ERA', k: 'ER' }, { h: 'BB', k: 'BB' }, { h: 'K', k: 'K' }, { h: 'HR', k: 'HR' }, { h: 'BF', k: 'BF' }, { h: 'Pitches', k: 'pitches' }], rows), { maxH: 640 }, 'full');
+  return fig('Outing by outing', '', table([
+    { h: 'Date', f: (r) => r.date.slice(5) }, { h: 'Opponent', f: (r) => opp(r) + (r.conf ? ' *' : '') }, { h: 'Dec', g: 'W', k: 'dec' }, { h: 'Start', g: 'GS', f: (r) => (r.start ? 'Yes' : '') },
+    { h: 'IP', k: 'IP' }, { h: 'H', k: 'H' }, { h: 'ER', g: 'ERA', k: 'ER' }, { h: 'BB', k: 'BB' }, { h: 'K', k: 'K' }, { h: 'HR', k: 'HR' }, { h: 'BF', k: 'BF' }, { h: 'Pitches', k: 'pitches' }], [...p.pitching.gamelog].reverse(), { maxH: 620 }));
+}
+function allStats(p, side) {
+  const B = side === 'h' ? p.hitting : p.pitching; const c = byId(p.id); const reg = side === 'p' ? STATS.P : STATS.H;
+  const groups = [];
+  const known = Object.keys(reg).filter((k) => c.s[side + '.' + k] != null).map((k) => [reg[k].label, fmtStat(k, side, c.s[side + '.' + k]) + (reg[k].unit ? ` ${reg[k].unit}` : ''), k]);
+  groups.push(['Key stats (tap for rank and trend)', statRows(side, known)]);
+  const pretty = (k) => k.replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\bpct\b/g, '%').replace(/^./, (m) => m.toUpperCase());
+  const flat = (title, o) => { if (!o) return; const rows = Object.entries(o).filter(([, v]) => v != null && typeof v !== 'object').map(([k, v]) => [pretty(k), typeof v === 'number' && !Number.isInteger(v) ? +v.toFixed(3) : v, null]); if (rows.length) groups.push([title, statRows(side, rows)]); };
+  if (p.team === 'atl') { flat('Season', B.season); flat('Advanced', B.advanced); flat('Sabermetrics', B.sabermetrics); flat('Statcast', B.statcast); if (side === 'h') { flat('Bat tracking', p.bat_tracking_lb); flat('Swing decisions (run value)', p.swing_take); } flat('Sprint speed', p.running.sprint); flat('Outs above average', p.fielding.oaa); flat('Arm strength', p.fielding.arm); flat('Catcher framing', p.fielding.framing); flat('Pop time', p.fielding.poptime); }
+  else { flat('Season', B.season); flat(side === 'h' ? 'Plate discipline' : 'Pitch sequence', side === 'h' ? B.plate_discipline : B.pitch_sequence); flat('Fielding', p.fielding); }
+  return `<input class="statfind" id="statfind" type="search" placeholder="Find a stat on this page, e.g. chase" autocomplete="off">
+    ${groups.map(([t, html], i) => i === 0 ? `<div class="statgroup"><h3>${esc(t)}</h3>${html}</div>` : `<details class="statgroup"><summary>${esc(t)}</summary>${html}</details>`).join('')}<div class="empty" id="statnone" style="display:none">No stat matches that. Try a shorter word, like "spin" or "walk".</div>
+    <p class="note"><a href="data/players/${p.id}.json" target="_blank" rel="noopener" style="text-decoration:underline">Raw data for this player</a> (machine-readable).</p>`;
 }
 
-// ===== ALL STATS =====
-function allStats(p, side) {
-  const B = side === 'hitting' ? p.hitting : p.pitching;
-  const blocks = [];
-  const flat = (title, o) => { if (!o) return; const rows = Object.entries(o).filter(([, v]) => v != null && typeof v !== 'object').map(([k, v]) => [k, typeof v === 'number' && !Number.isInteger(v) ? +v.toFixed(3) : v, k]); if (rows.length) blocks.push(panel(title, '', kv(rows), 'full')); };
-  if (p.team === 'atl') { flat('Season (MLB Stats API)', B.season); flat('Advanced', B.advanced); flat('Sabermetrics', B.sabermetrics); flat('Statcast (computed from every pitch)', B.statcast); flat('Expected stats (MLB)', B.expected_api); flat('Bat tracking leaderboard', side === 'hitting' ? p.bat_tracking_lb : null); flat('Swing/take run values', side === 'hitting' ? p.swing_take : null); flat('Sprint speed', p.running.sprint); flat('Outs above average', p.fielding.oaa); flat('Arm strength', p.fielding.arm); flat('Catcher framing', p.fielding.framing); flat('Pop time', p.fielding.poptime); (p.fielding.by_position || []).forEach((fp) => flat('Fielding — ' + fp.position, fp)); }
-  else { flat('Season', B.season); flat(side === 'hitting' ? 'Plate discipline' : 'Pitch sequence', side === 'hitting' ? B.plate_discipline : B.pitch_sequence); flat('Fielding', p.fielding); }
-  return `<div class="grid2">${blocks.join('')}${panel('Data for agents', 'The full machine-readable profile behind this page.', `<a class="chip" href="data/players/${p.id}.json" target="_blank" rel="noopener">Open raw JSON</a>`, 'full')}</div>`;
+// ---------- stat sheet ----------
+document.addEventListener('click', (e) => {
+  const st = e.target.closest && e.target.closest('[data-stat]');
+  if (st) { const m = location.hash.match(/^#p-((?:atl|usm)-[0-9a-z]+)/); if (m) { const [s, k] = st.dataset.stat.split(':'); openStat(m[1], s, k); } return; }
+  const g = e.target.closest && e.target.closest('[data-gloss]');
+  if (g) { const d = window.gloss(g.dataset.gloss); if (d) openSheetHTML(`<div class="grab"></div><button class="sx" data-close aria-label="Close">×</button><h2>${esc(d[0])}</h2><p class="def">${esc(d[1])}</p>`); }
+});
+async function openStat(id, side, key) {
+  const c = byId(id); const p = await player(id); const reg = side === 'p' ? STATS.P : STATS.H; const m = reg[key]; if (!m) return;
+  const v = c.s[side + '.' + key]; const rk = rankOf(c, side, key); const g = window.gloss(m.g || key);
+  const list = ranking(c.team, side, key); const vals = list.map((x) => x.s[side + '.' + key]);
+  const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  const ser = series(p, side, m.trend);
+  state.sheet = { id, side, key };
+  openSheetHTML(`<div class="grab"></div><button class="sx" data-close aria-label="Close">×</button>
+    <div class="who">${esc(c.name)}, ${esc(TEAM[c.team].short)}</div><h2>${esc(m.label)}</h2>
+    <div class="big"><b>${fmtStat(key, side, v)}</b><span>${m.unit ? esc(m.unit) : ''}${avg != null && m.q ? ` Team average among qualified players: ${fmtStat(key, side, avg)}` : ''}</span></div>
+    ${rk && rk.r ? `<div class="rank"><b>${ord(rk.r)}</b> of ${rk.of} on the ${esc(TEAM[c.team].short)}${m.q ? ' (qualified)' : ''}</div>` : rk && rk.unq ? `<div class="rank">Not enough playing time to rank (${STATS.MIN[c.team][side]}+ ${side === 'h' ? 'PA' : 'IP'})</div>` : ''}
+    <p class="def">${esc(g ? g[1] : '')}</p>
+    ${ser ? `<div style="margin-top:4px">${C.line({ series: [{ name: m.label, color: C.v('--amber'), values: ser.values }], labels: ser.labels, fmt: (x) => fmtStat(key, side, x), height: 180, title: m.label + ' season to date' })}</div><p class="note">Season to date after every game.</p>` : ''}
+    <div class="acts"><a class="pill" href="#lead-${c.team}-${side}-${encKey(key)}">See team leaders</a>${!location.hash.startsWith('#p-' + id) ? `<a class="pill" href="#p-${id}">Open ${esc(c.name)}</a>` : ''}</div>`);
+  C.mount();
 }
+function openSheetHTML(html) { const s = document.getElementById('sheet'); s.innerHTML = html; s.classList.add('on'); document.getElementById('scrim').classList.add('on'); s.querySelector('[data-close]').onclick = closeSheet; }
+function closeSheet() { const s = document.getElementById('sheet'); if (!s) return; s.classList.remove('on'); if (!document.getElementById('palette').classList.contains('on')) document.getElementById('scrim').classList.remove('on'); }
+
+// ---------- search palette ----------
+const ICON = {
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
+};
+function openPalette(q = '') {
+  const pl = document.getElementById('palette'); pl.classList.add('on'); document.getElementById('scrim').classList.add('on');
+  const inp = document.getElementById('pq'); inp.value = q; renderResults(q); setTimeout(() => inp.focus(), 30);
+}
+function closePalette() { const pl = document.getElementById('palette'); if (!pl) return; pl.classList.remove('on'); if (!document.getElementById('sheet').classList.contains('on')) document.getElementById('scrim').classList.remove('on'); }
+function statMatches(qn) {
+  const out = []; if (!qn) return out;
+  for (const [side, reg] of [['h', STATS.H], ['p', STATS.P]]) for (const [k, m] of Object.entries(reg)) {
+    const names = [norm(k), norm(m.label)]; const alias = Object.entries(STATS.ALIAS).filter(([, v]) => v === k).map(([a]) => a);
+    let score = 0;
+    for (const n of [...names, ...alias]) { if (n === qn) score = Math.max(score, 3); else if (n.startsWith(qn) || qn.includes(n) && n.length > 2) score = Math.max(score, 2); else if (n.includes(qn) && qn.length > 2) score = Math.max(score, 1); }
+    if (score) out.push({ side, k, m, score });
+  }
+  return out.sort((a, b) => b.score - a.score);
+}
+function renderResults(q) {
+  const I = state.index; const qn = norm(q).trim(); const box = document.getElementById('pres'); let items = [];
+  if (!qn) {
+    const rec = store.get('hz-recent', []).map(byId).filter(Boolean).slice(0, 5);
+    if (rec.length) items.push(['Recently viewed', rec.map((c) => ({ go: `#p-${c.id}`, html: `${av(c)}<span class="main"><b>${esc(c.name)}</b><small>${esc(c.pos || '')}, ${TEAM[c.team].short}</small></span>` }))]);
+    items.push(['Try', [['Olson barrel', 'Braves stat for one player'], ['ERA', 'Team leaders'], ['Urban', 'Southern Miss player'], ['spin', 'Find a stat by name']].map(([t, d]) => ({ q: t, html: `<span class="ico">${ICON.search}</span><span class="main"><b>${esc(t)}</b><small>${esc(d)}</small></span>` }))]);
+  } else {
+    const words = qn.split(/\s+/);
+    // split query into player part + stat part
+    const players = I.players.map((c) => { const n = norm(c.name); const hits = words.filter((w) => w.length > 1 && n.split(/\s+/).some((part) => part.startsWith(w))); return { c, hits }; }).filter((x) => x.hits.length).sort((a, b) => b.hits.length - a.hits.length || (b.c.sort || 0) - (a.c.sort || 0));
+    const usedWords = players.length ? players[0].hits : [];
+    const statQ = words.filter((w) => !usedWords.includes(w)).join(' ');
+    const stats = statMatches(statQ || (players.length ? '' : qn));
+    if (players.length && stats.length) {
+      const combo = [];
+      for (const pl of players.slice(0, 3)) for (const st of stats.slice(0, 4)) { const v = pl.c.s[st.side + '.' + st.k]; if (v != null) combo.push({ go: `#p-${pl.c.id}-s-${st.side}-${encKey(st.k)}`, html: `${av(pl.c)}<span class="main"><b>${esc(pl.c.name)}</b><small>${esc(st.m.label)}</small></span><span class="rv">${fmtStat(st.k, st.side, v)}</span>` }); }
+      if (combo.length) items.push(['Best match', combo.slice(0, 5)]);
+    }
+    if (players.length) items.push(['Players', players.slice(0, 8).map(({ c }) => ({ go: `#p-${c.id}`, html: `${av(c)}<span class="main"><b>${esc(c.name)}</b><small>${esc(c.pos || '')}, ${TEAM[c.team].short}</small></span><span class="rv">${c.role === 'pitcher' ? fmtStat('ERA', 'p', c.s['p.ERA']) : fmtStat('AVG', 'h', c.s['h.AVG'])}</span>` }))]);
+    if (stats.length && !players.length) {
+      const rows = [];
+      for (const st of stats.slice(0, 4)) for (const t of ['atl', 'usm']) { const top = ranking(t, st.side, st.k)[0]; if (top) rows.push({ go: `#lead-${t}-${st.side}-${encKey(st.k)}`, html: `<span class="ico">${TEAM[t].abbr}</span><span class="main"><b>${esc(st.m.label)} leaders</b><small>${TEAM[t].short} ${st.side === 'p' ? 'pitching' : 'hitting'}; leader: ${esc(top.name)}</small></span><span class="rv">${fmtStat(st.k, st.side, top.s[st.side + '.' + st.k])}</span>` }); }
+      items.push(['Stats', rows]);
+    }
+  }
+  const flatItems = items.flatMap(([, xs]) => xs);
+  box.innerHTML = flatItems.length ? items.map(([g, xs]) => `<div class="grp">${esc(g)}</div>${xs.map((x) => `<button class="item" data-pgo="${esc(x.go || '')}" data-pq="${esc(x.q || '')}">${x.html}</button>`).join('')}`).join('')
+    : `<div class="empty">Nothing matches “${esc(q)}”. Try a last name, a jersey number, or a stat like “walk rate”.</div>`;
+  state.sel = 0; markSel();
+  box.querySelectorAll('.item').forEach((b) => (b.onclick = () => pick(b)));
+}
+function markSel() { const its = [...document.querySelectorAll('#pres .item')]; its.forEach((x, i) => x.classList.toggle('sel', i === state.sel)); if (its[state.sel]) its[state.sel].scrollIntoView({ block: 'nearest' }); }
+function pick(b) { if (b.dataset.pq) { document.getElementById('pq').value = b.dataset.pq; renderResults(b.dataset.pq); return; } closePalette(); if (location.hash === b.dataset.pgo) route(); else location.hash = b.dataset.pgo; }
 
 // ---------- boot ----------
-document.getElementById('back').addEventListener('click', () => (history.length > 1 ? history.back() : nav('')));
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-open-find]')) { e.preventDefault(); openPalette(); }
+  const q = e.target.closest('[data-q]'); if (q) { e.preventDefault(); openPalette(q.dataset.q); }
+  if (e.target.id === 'scrim') { closePalette(); closeSheet(); }
+});
+document.addEventListener('keydown', (e) => {
+  const open = document.getElementById('palette').classList.contains('on');
+  if ((e.key === 'k' && (e.metaKey || e.ctrlKey)) || (e.key === '/' && !open && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName))) { e.preventDefault(); openPalette(); return; }
+  if (e.key === 'Escape') { closePalette(); closeSheet(); return; }
+  if (open) {
+    const n = document.querySelectorAll('#pres .item').length;
+    if (e.key === 'ArrowDown') { e.preventDefault(); state.sel = Math.min(n - 1, state.sel + 1); markSel(); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); state.sel = Math.max(0, state.sel - 1); markSel(); }
+    if (e.key === 'Enter') { const b = document.querySelectorAll('#pres .item')[state.sel]; if (b) { e.preventDefault(); pick(b); } }
+  }
+});
+document.getElementById('pq').addEventListener('input', (e) => renderResults(e.target.value));
 document.getElementById('theme').addEventListener('click', () => {
   const cur = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-  document.documentElement.dataset.theme = cur; try { localStorage.setItem('theme', cur); } catch (e) {}
-  route();
+  document.documentElement.dataset.theme = cur; store.set('hz-theme', cur); route();
 });
-document.querySelector('#gloss .x').addEventListener('click', () => document.getElementById('gloss').classList.remove('on'));
-document.addEventListener('click', (e) => {
-  const b = e.target.closest('[data-spray]'); if (!b) return;
-  const s = new Set(ui('spray-show', '1B,2B,3B,HR,Out').split(',')); s.has(b.dataset.spray) ? s.delete(b.dataset.spray) : s.add(b.dataset.spray);
-  state.ui['spray-show'] = [...s].join(','); route();
-});
-try { const t = localStorage.getItem('theme'); if (t) document.documentElement.dataset.theme = t; else if (matchMedia('(prefers-color-scheme: light)').matches) document.documentElement.dataset.theme = 'light'; } catch (e) {}
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+(() => { const t = store.get('hz-theme', null); if (t) document.documentElement.dataset.theme = t; })();
+if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 route();
