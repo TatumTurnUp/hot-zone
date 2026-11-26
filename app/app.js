@@ -539,7 +539,7 @@ document.addEventListener('click', (e) => {
   const g = e.target.closest && e.target.closest('[data-gloss]');
   if (g) { const d = window.gloss(g.dataset.gloss); if (d) openSheetHTML(`<div class="grab"></div><button class="sx" data-close aria-label="Close">×</button><h2>${esc(d[0])}</h2><p class="def">${esc(d[1])}</p>`); }
 });
-async function openStat(id, side, key) {
+async function openStat(id, side, key, opt = {}) {
   const c = byId(id); const p = await player(id); const reg = side === 'p' ? STATS.P : STATS.H; const m = reg[key]; if (!m) return;
   const v = c.s[side + '.' + key]; const rk = rankOf(c, side, key); const g = window.gloss(m.g || key);
   const list = ranking(c.team, side, key); const vals = list.map((x) => x.s[side + '.' + key]);
@@ -552,11 +552,11 @@ async function openStat(id, side, key) {
     ${rk && rk.r ? `<div class="rank"><b>${ord(rk.r)}</b> of ${rk.of} on the ${esc(TEAM[c.team].short)}${m.q ? ' (qualified)' : ''}</div>` : rk && rk.unq ? `<div class="rank">Not enough playing time to rank (${STATS.MIN[c.team][side]}+ ${side === 'h' ? 'PA' : 'IP'})</div>` : ''}
     <p class="def">${esc(g ? g[1] : '')}</p>
     ${ser ? `<div style="margin-top:4px">${C.line({ series: [{ name: m.label, color: C.v('--amber'), values: ser.values }], labels: ser.labels, fmt: (x) => fmtStat(key, side, x), height: 180, title: m.label + ' season to date' })}</div><p class="note">Season to date after every game.</p>` : ''}
-    <div class="acts"><a class="pill" href="#lead-${c.team}-${side}-${encKey(key)}">See team leaders</a>${!location.hash.startsWith('#p-' + id) ? `<a class="pill" href="#p-${id}">Open ${esc(c.name)}</a>` : ''}</div>`);
+    ${opt.fromTour ? '<p class="note">Tap the blinking × to close this card and get back to the tutorial.</p>' : `<div class="acts"><a class="pill" href="#lead-${c.team}-${side}-${encKey(key)}">See team leaders</a>${!location.hash.startsWith('#p-' + id) ? `<a class="pill" href="#p-${id}">Open ${esc(c.name)}</a>` : ''}</div>`}`, opt);
   C.mount();
 }
-function openSheetHTML(html) { const s = document.getElementById('sheet'); s.innerHTML = html; s.classList.add('on'); document.getElementById('scrim').classList.add('on'); s.querySelector('[data-close]').onclick = closeSheet; }
-function closeSheet() { const s = document.getElementById('sheet'); if (!s) return; s.classList.remove('on'); if (!document.getElementById('palette').classList.contains('on')) document.getElementById('scrim').classList.remove('on'); }
+function openSheetHTML(html, opt = {}) { const s = document.getElementById('sheet'); s.innerHTML = html; s.classList.toggle('over', !!opt.fromTour); s.classList.add('on'); document.getElementById('scrim').classList.add('on'); s.querySelector('[data-close]').onclick = closeSheet; }
+function closeSheet() { const s = document.getElementById('sheet'); if (!s) return; s.classList.remove('on'); const keep = document.getElementById('palette').classList.contains('on') || document.getElementById('tour').classList.contains('on'); if (!keep) document.getElementById('scrim').classList.remove('on'); }
 
 // ---------- search palette ----------
 const ICON = {
@@ -577,8 +577,8 @@ function statMatches(qn) {
   }
   return out.sort((a, b) => b.score - a.score);
 }
-function renderResults(q) {
-  const I = state.index; const qn = norm(q).trim(); const box = document.getElementById('pres'); let items = [];
+function searchItems(q) {
+  const I = state.index; const qn = norm(q).trim(); let items = [];
   if (!qn) {
     const rec = store.get('hz-recent', []).map(byId).filter(Boolean).slice(0, 5);
     if (rec.length) items.push(['Recently viewed', rec.map((c) => ({ go: `#p-${c.id}`, html: `${av(c)}<span class="main"><b>${esc(c.name)}</b><small>${esc(c.pos || '')}, ${TEAM[c.team].short}</small></span>` }))]);
@@ -608,6 +608,10 @@ function renderResults(q) {
     const G = window.GLOSSARY; const hits = Object.entries(G).filter(([k, v]) => norm(k).includes(qn) || norm(v[0]).includes(qn)).slice(0, 5);
     if (hits.length) items.push(['What that means', hits.map(([k, v]) => ({ gl: k, html: `<span class="ico">?</span><span class="main"><b>${esc(v[0])}</b><small>${esc(v[1].slice(0, 90))}${v[1].length > 90 ? '…' : ''}</small></span>` }))]);
   }
+  return items;
+}
+function renderResults(q) {
+  const qn = norm(q).trim(); const box = document.getElementById('pres'); const items = searchItems(q);
   const flatItems = items.flatMap(([, xs]) => xs);
   box.innerHTML = flatItems.length ? items.map(([g, xs]) => `<div class="grp">${esc(g)}</div>${xs.map((x) => `<button class="item" data-pgo="${esc(x.go || '')}" data-pq="${esc(x.q || '')}" data-pgl="${esc(x.gl || '')}">${x.html}</button>`).join('')}`).join('')
     : `<div class="empty">Nothing matches “${esc(q)}”. Try a last name, a jersey number, or a stat like “walk rate” or “spin”.</div>`;
@@ -618,40 +622,76 @@ function markSel() { const its = [...document.querySelectorAll('#pres .item')]; 
 function pick(b) { if (b.dataset.pgl) { closePalette(); const d = window.gloss(b.dataset.pgl); openSheetHTML(`<div class="grab"></div><button class="sx" data-close aria-label="Close">×</button><h2>${esc(d[0])}</h2><p class="def">${esc(d[1])}</p><p class="note">Find it in “Every stat” at the bottom of a player page.</p>`); return; } if (b.dataset.pq) { document.getElementById('pq').value = b.dataset.pq; renderResults(b.dataset.pq); return; } closePalette(); if (location.hash === b.dataset.pgo) route(); else location.hash = b.dataset.pgo; }
 
 // ---------- tutorial ----------
-const TOUR = () => {
+// Four live slides; nothing in them navigates away, so the tour never closes by accident.
+const isPhone = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent) && innerWidth < 1100) || matchMedia('(pointer: coarse)').matches;
+const isIOS = () => /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+const TOUR_STAR = { atl: { id: 'atl-621566', side: 'h', keys: ['AVG', 'HR', 'xwOBA'] }, usm: { id: 'usm-10486', side: 'h', keys: ['AVG', 'HR', 'OPS+'] } };
+function tourSteps() {
   const atl = MODE.cur === 'atl';
-  const ex = atl ? [['Olson barrel rate', 'one player\u2019s stat'], ['Sale spin', 'one player\u2019s stat'], ['ERA', 'team leaders'], ['Joey Urban', 'works for both teams']]
-    : [['Urban OPS', 'one player\u2019s stat'], ['Clark strikeout rate', 'one player\u2019s stat'], ['walk rate', 'team leaders'], ['Matt Olson', 'works for both teams']];
+  const ex = atl ? [['Olson barrel rate', 'one player’s stat'], ['Sale spin', 'one player’s stat'], ['ERA', 'team leaders'], ['Joey Urban', 'works for both teams']]
+    : [['Urban OPS', 'one player’s stat'], ['Clark strikeout rate', 'one player’s stat'], ['walk rate', 'team leaders'], ['Matt Olson', 'works for both teams']];
+  const star = TOUR_STAR[MODE.cur]; const c = byId(star.id);
+  const phone = isPhone();
   return [
-    { h: 'Search anything', p: 'Type a player, a stat, or both together. Results come from both teams. Tap an example to try it:', demo: ex.map(([q, d]) => `<button class="ex" data-tq="${esc(q)}">${ICON.search}<code>${esc(q)}</code><span>${esc(d)}</span></button>`).join('') },
-    { h: 'Tap any number', p: 'Every stat on a player page opens a card that explains what it means, where he ranks on his team, and how it changed over the season.', demo: `<div class="key" style="pointer-events:none;max-width:220px"><span class="kl">${atl ? 'Batting average' : 'Batting average'}</span><span class="kv">${atl ? '.251' : '.320'}</span><span class="kr"><b>${atl ? '6th' : '2nd'}</b> of ${atl ? 9 : 7} on the team</span></div>` },
-    { h: 'Braves or Southern Miss', p: 'The switch at the top right flips the whole site between the two teams. Each side remembers the page you were on until you reload.', demo: `<div class="teamswitch" style="pointer-events:none;justify-self:start"><button class="t-atl ${atl ? 'on' : ''}"><i></i>Braves</button><button class="t-usm ${atl ? '' : 'on'}"><i></i>Southern Miss</button></div>` },
-    { h: 'Inside a player page', p: 'Use the bar under the key stats to jump to the strike zone, spray chart, trends, splits or game log. On a phone, swipe charts sideways. “Every stat” at the bottom has its own search box.', demo: '' },
+    { h: 'Search anything', p: 'Type a player, a stat, or both together. Results come from both teams. Tap an example to see what it finds:',
+      demo: () => ex.map(([q, d], i) => `<div class="exwrap ${state.tourEx === i ? 'open' : ''}"><button class="ex" data-tex="${i}" aria-expanded="${state.tourEx === i}">${ICON.search}<code>${esc(q)}</code><span>${esc(d)}</span><b class="chev">${state.tourEx === i ? '−' : '+'}</b></button>
+        <div class="exres">${state.tourEx === i ? tourResults(q) : ''}</div></div>`).join('') },
+    { h: 'Tap any number', p: `Every stat on a player page opens a card with what it means, his team rank, and his season trend. These are ${esc(c ? c.name : '')}’s. Tap them to try:`,
+      demo: () => `<div class="tkeys">${star.keys.map((k) => { const reg = STATS.H; const rk = rankOf(c, star.side, k); return `<button class="key" data-tstat="${k}" aria-label="${esc(reg[k].label)}"><span class="kl">${esc(k)}</span><span class="kv">${fmtStat(k, star.side, c.s[star.side + '.' + k])}</span><span class="kr">${rk && rk.r ? `<b>${ord(rk.r)}</b> on the team` : '&nbsp;'}</span></button>`; }).join('')}</div>` },
+    { h: 'Braves or Southern Miss', p: 'This switch flips the whole site between the two teams, and each side remembers the page you were on. Try it here; the site behind this card changes too.',
+      demo: () => `<div class="teamswitch big" role="radiogroup" aria-label="Team">${['atl', 'usm'].map((t) => `<button class="t-${t} ${MODE.cur === t ? 'on' : ''}" data-tmode="${t}" role="radio" aria-checked="${MODE.cur === t}"><i></i>${t === 'atl' ? 'Braves' : 'Southern Miss'}</button>`).join('')}</div>` },
+    { h: 'Inside a player page', p: phone ? 'Tap a section name to jump there, swipe charts sideways, and use the search box in “Every stat” to find any number on the page.' : 'Click a section name to jump there, scroll through the charts, and use the search box in “Every stat” to find any number on the page.',
+      demo: () => tourAnim(phone) },
   ];
-};
+}
+function tourResults(q) {
+  const items = searchItems(q).flatMap(([g, xs]) => xs.map((x) => ({ g, ...x }))).slice(0, 3);
+  if (!items.length) return '<div class="empty" style="padding:10px">No results.</div>';
+  return items.map((x) => `<div class="item" aria-hidden="false">${x.html}</div>`).join('') + `<p class="note" style="margin:6px 4px 2px">In the real search, tapping a result opens it.</p>`;
+}
+function tourAnim(phone) {
+  const pills = ['Summary', 'Strike zone', 'Trends', 'Every stat'];
+  const zone = Array.from({ length: 9 }, (_, i) => `<i style="background:${['#c52f30', '#f08a8b', '#3d5a8d', '#eb6263', '#c52f30', '#f08a8b', '#2370cd', '#6aabf1', '#eb6263'][i]}"></i>`).join('');
+  const screen = `<div class="mock-hero"><b>28</b><span></span></div>
+    <div class="mock-pills">${pills.map((p, i) => `<em class="p${i}">${p}</em>`).join('')}<u></u></div>
+    <div class="mock-body"><div class="mock-track"><div class="mock-card"><div class="mock-zone">${zone}</div></div><div class="mock-card"><div class="mock-line"><svg viewBox="0 0 100 40" preserveAspectRatio="none"><path d="M0 30 L15 22 L30 26 L45 12 L60 18 L75 8 L100 14" fill="none" stroke="currentColor" stroke-width="3"/></svg></div></div><div class="mock-card"><div class="mock-spray"></div></div></div>
+      <div class="mock-find"><span class="typed">chase</span></div><div class="mock-rows"><i></i><i class="keep"></i><i></i><i></i></div></div>
+    <div class="${phone ? 'finger' : 'cursor'}"></div>`;
+  return `<div class="anim ${phone ? 'phone' : 'desk'}" aria-label="Animation: jumping between sections, ${phone ? 'swiping' : 'scrolling'} charts, and filtering stats">
+    ${phone ? `<div class="device phone"><div class="notch"></div><div class="scr">${screen}</div></div>` : `<div class="device desk"><div class="chrome"><i></i><i></i><i></i><span>hot-zone.vercel.app</span></div><div class="scr">${screen}</div></div>`}
+    <ol class="anim-cap"><li>${phone ? 'Tap' : 'Click'} a section</li><li>${phone ? 'Swipe the charts' : 'Scroll the charts'}</li><li>Filter every stat</li></ol></div>`;
+}
 function openTour(i = 0) {
-  const steps = TOUR(); const st = steps[i]; const el = document.getElementById('tour');
-  el.innerHTML = `<div class="step">${i + 1} of ${steps.length}</div><h2>${esc(st.h)}</h2><p>${esc(st.p)}</p>${st.demo ? `<div class="demo">${st.demo}</div>` : ''}
+  state.tourStep = i; if (i !== 0) state.tourEx = null;
+  const steps = tourSteps(); const st = steps[i]; const el = document.getElementById('tour');
+  el.innerHTML = `<button class="tx" aria-label="Close tutorial">×</button><div class="step">${i + 1} of ${steps.length}</div><h2>${esc(st.h)}</h2><p>${esc(st.p)}</p><div class="demo">${st.demo()}</div>
     <div class="nav"><div class="dots">${steps.map((_, k) => `<i class="${k === i ? 'on' : ''}"></i>`).join('')}</div><div>${i > 0 ? '<button class="prev">Back</button>' : '<button class="prev skip">Skip</button>'}<button class="next">${i === steps.length - 1 ? 'Start exploring' : 'Next'}</button></div></div>`;
   el.classList.add('on'); document.getElementById('scrim').classList.add('on'); store.set('hz-toured', true);
+  el.querySelector('.tx').onclick = closeTour;
   el.querySelector('.next').onclick = () => (i === steps.length - 1 ? closeTour() : openTour(i + 1));
   el.querySelector('.prev').onclick = () => (i > 0 ? openTour(i - 1) : closeTour());
-  el.querySelectorAll('[data-tq]').forEach((b) => (b.onclick = () => { closeTour(); openPalette(b.dataset.tq); }));
-  setTimeout(() => el.querySelector('.next').focus(), 30);
+  el.querySelectorAll('[data-tex]').forEach((b) => (b.onclick = () => { const k = +b.dataset.tex; state.tourEx = state.tourEx === k ? null : k; openTour(0); const nb = document.querySelector(`[data-tex="${k}"]`); if (nb) nb.focus(); }));
+  el.querySelectorAll('[data-tstat]').forEach((b) => (b.onclick = () => { const s = TOUR_STAR[MODE.cur]; openStat(s.id, s.side, b.dataset.tstat, { fromTour: true }); }));
+  el.querySelectorAll('[data-tmode]').forEach((b) => (b.onclick = async () => { if (b.dataset.tmode === MODE.cur) return; await switchMode(b.dataset.tmode); openTour(2); }));
 }
-function closeTour() { const el = document.getElementById('tour'); if (!el || !el.classList.contains('on')) return; el.classList.remove('on'); if (!document.getElementById('palette').classList.contains('on') && !document.getElementById('sheet').classList.contains('on')) document.getElementById('scrim').classList.remove('on'); }
+function closeTour() { const el = document.getElementById('tour'); if (!el || !el.classList.contains('on')) return; el.classList.remove('on'); closeSheet(); if (!document.getElementById('palette').classList.contains('on')) document.getElementById('scrim').classList.remove('on'); }
 function maybeTour() { if (!state.tourChecked) { state.tourChecked = true; if (!store.get('hz-toured', false)) setTimeout(() => openTour(0), 500); } }
 
+function closeTop() {
+  const sh = document.getElementById('sheet'), tr = document.getElementById('tour');
+  if (sh.classList.contains('on') && tr.classList.contains('on')) return closeSheet();
+  closePalette(); closeSheet(); closeTour();
+}
 // ---------- boot ----------
 document.addEventListener('click', (e) => {
   if (e.target.closest('[data-open-find]')) { e.preventDefault(); openPalette(); }
   const q = e.target.closest('[data-q]'); if (q) { e.preventDefault(); openPalette(q.dataset.q); }
-  if (e.target.id === 'scrim') { closePalette(); closeSheet(); closeTour(); }
+  if (e.target.id === 'scrim') { closeTop(); }
 });
 document.addEventListener('keydown', (e) => {
   const open = document.getElementById('palette').classList.contains('on');
   if ((e.key === 'k' && (e.metaKey || e.ctrlKey)) || (e.key === '/' && !open && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName))) { e.preventDefault(); openPalette(); return; }
-  if (e.key === 'Escape') { closePalette(); closeSheet(); closeTour(); return; }
+  if (e.key === 'Escape') { closeTop(); return; }
   if (open) {
     const n = document.querySelectorAll('#pres .item').length;
     if (e.key === 'ArrowDown') { e.preventDefault(); state.sel = Math.min(n - 1, state.sel + 1); markSel(); }
